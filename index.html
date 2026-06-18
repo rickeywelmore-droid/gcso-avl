@@ -1,69 +1,28 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <meta charset="utf-8" />
-  <title>GCSO AVL</title>
+  <title>Map Test</title>
 
-  <!-- Leaflet -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
   <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
 
-  <!-- Firebase (IMPORTANT: HTML ONLY HERE) -->
-  <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-database-compat.js"></script>
-
   <style>
-    body { margin:0; font-family: Arial; display:flex; height:100vh; }
-    #sidebar { width:320px; background:#111; color:white; padding:10px; overflow:auto; }
-    #map { flex:1; }
-    .unit { padding:8px; margin:5px 0; background:#222; cursor:pointer; }
-    .offline { border-left:4px solid red; }
-    input, button { width:100%; margin:5px 0; padding:8px; }
-    button { cursor:pointer; }
-    #details { margin-top:10px; padding:10px; background:#1c1c1c; }
+    html, body {
+      height: 100%;
+      margin: 0;
+    }
+    #map {
+      height: 100%;
+      width: 100%;
+    }
   </style>
 </head>
 
 <body>
-
-<div id="sidebar">
-  <h3>GCSO AVL</h3>
-
-  <input id="unitId" placeholder="Unit ID (e.g. 101)" />
-  <button onclick="startUnit()">Start Tracking</button>
-
-  <div id="unitList"></div>
-
-  <div id="details">Select a unit</div>
-</div>
-
 <div id="map"></div>
 
 <script>
-//////////////////////////////////////////////////////
-// FIREBASE INIT
-//////////////////////////////////////////////////////
-
-const firebaseConfig = {
-  apiKey: "AIzaSyA5hXURTrwoUkMRBkI2iEYU74CsG4z_vcU",
-  authDomain: "gcso-avl.firebaseapp.com",
-  databaseURL: "https://gcso-avl-default-rtdb.firebaseio.com",
-  projectId: "gcso-avl",
-  storageBucket: "gcso-avl.firebasestorage.app",
-  messagingSenderId: "463504227099",
-  appId: "1:463504227099:web:9d522246b11892fc0731be"
-};
-
-firebase.initializeApp(firebaseConfig);
-
-const db = firebase.database();
-const unitsRef = db.ref("units");
-
-console.log("Firebase ready");
-
-//////////////////////////////////////////////////////
-// MAP INIT
-//////////////////////////////////////////////////////
+console.log("starting map");
 
 const map = L.map('map').setView([38.9, -84.5], 10);
 
@@ -71,89 +30,7 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   maxZoom: 19
 }).addTo(map);
 
-let markers = {};
-
-//////////////////////////////////////////////////////
-// UNIT MODE (GPS UPLOAD)
-//////////////////////////////////////////////////////
-
-function startUnit() {
-  const id = document.getElementById("unitId").value.trim();
-  if (!id) return alert("Enter Unit ID");
-
-  navigator.geolocation.watchPosition((pos) => {
-
-    const data = {
-      lat: pos.coords.latitude,
-      lon: pos.coords.longitude,
-      speed: pos.coords.speed || 0,
-      heading: pos.coords.heading || 0,
-      acc: pos.coords.accuracy,
-      time: Date.now()
-    };
-
-    unitsRef.child(id).set(data);
-
-  }, (err) => {
-    alert("GPS error: " + err.message);
-  }, {
-    enableHighAccuracy: true,
-    maximumAge: 0,
-    timeout: 10000
-  });
-}
-
-//////////////////////////////////////////////////////
-// DISPATCH VIEW (REALTIME)
-//////////////////////////////////////////////////////
-
-unitsRef.on("value", (snap) => {
-  const data = snap.val();
-  const list = document.getElementById("unitList");
-
-  list.innerHTML = "";
-
-  if (!data) return;
-
-  Object.keys(data).forEach(id => {
-    const u = data[id];
-    if (!u) return;
-
-    const age = Date.now() - u.time;
-    const offline = age > 15000;
-
-    const div = document.createElement("div");
-    div.className = "unit" + (offline ? " offline" : "");
-
-    div.innerHTML = `
-      <b>${id}</b><br>
-      ${offline ? "OFFLINE" : "ONLINE"}<br>
-      ${Math.round((u.speed || 0) * 2.237)} mph
-    `;
-
-    div.onclick = () => {
-      map.setView([u.lat, u.lon], 16);
-
-      document.getElementById("details").innerHTML = `
-        <b>Unit ${id}</b><br><br>
-        Speed: ${Math.round((u.speed || 0) * 2.237)} mph<br>
-        Heading: ${u.heading || 0}<br>
-        Accuracy: ${Math.round(u.acc || 0)} m<br>
-        Last update: ${new Date(u.time).toLocaleTimeString()}
-      `;
-    };
-
-    list.appendChild(div);
-
-    // MARKERS
-    if (!markers[id]) {
-      markers[id] = L.marker([u.lat, u.lon]).addTo(map);
-    } else {
-      markers[id].setLatLng([u.lat, u.lon]);
-    }
-  });
-});
-
+console.log("map loaded");
 </script>
 
 </body>
