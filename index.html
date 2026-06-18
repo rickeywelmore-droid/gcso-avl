@@ -101,199 +101,168 @@
 </div>
 
 <script>
-console.log("AVL booting...");
+document.addEventListener("DOMContentLoaded", function () {
 
-//////////////////////////////////////////////////////
-// FIREBASE INIT (SAFE ORDER)
-//////////////////////////////////////////////////////
+  console.log("AVL boot sequence started");
 
-const firebaseConfig = {
-  apiKey: "AIzaSyA5hXURTrwoUkMRBkI2iEYU74CsG4z_vcU",
-  authDomain: "gcso-avl.firebaseapp.com",
-  databaseURL: "https://gcso-avl-default-rtdb.firebaseio.com",
-  projectId: "gcso-avl"
-};
+  //////////////////////////////////////////////////////
+  // FIREBASE
+  //////////////////////////////////////////////////////
 
-firebase.initializeApp(firebaseConfig);
+  const firebaseConfig = {
+    apiKey: "AIzaSyA5hXURTrwoUkMRBkI2iEYU74CsG4z_vcU",
+    authDomain: "gcso-avl.firebaseapp.com",
+    databaseURL: "https://gcso-avl-default-rtdb.firebaseio.com",
+    projectId: "gcso-avl"
+  };
 
-const db = firebase.database();
-const unitsRef = db.ref("units");
+  firebase.initializeApp(firebaseConfig);
 
-console.log("Firebase OK");
+  const db = firebase.database();
+  const unitsRef = db.ref("units");
 
-//////////////////////////////////////////////////////
-// MAP INIT
-//////////////////////////////////////////////////////
+  console.log("Firebase ready");
 
-const map = L.map('map').setView([38.9, -84.5], 10);
+  //////////////////////////////////////////////////////
+  // MAP
+  //////////////////////////////////////////////////////
 
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-  maxZoom: 19
-}).addTo(map);
+  const map = L.map('map').setView([38.9, -84.5], 10);
 
-console.log("Map OK");
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19
+  }).addTo(map);
 
-let markers = {};
+  console.log("Map ready");
 
-//////////////////////////////////////////////////////
-// STATE
-//////////////////////////////////////////////////////
+  //////////////////////////////////////////////////////
+  // STATE
+  //////////////////////////////////////////////////////
 
-let watchId = null;
-let currentUnitId = null;
-let mode = "dispatch";
+  let watchId = null;
+  let currentUnitId = null;
+  let markers = {};
 
-//////////////////////////////////////////////////////
-// MODE SWITCH
-//////////////////////////////////////////////////////
+  window.unitStatus = "10-8";
 
-function setMode(m) {
-  mode = m;
-  console.log("Mode:", mode);
-}
+  //////////////////////////////////////////////////////
+  // STATUS
+  //////////////////////////////////////////////////////
 
-//////////////////////////////////////////////////////
-// START UNIT TRACKING
-//////////////////////////////////////////////////////
+  window.setStatus = function(status) {
+    window.unitStatus = status;
 
-function startUnit() {
-  const id = document.getElementById("unitId").value.trim();
-  if (!id) return alert("Enter Unit ID");
-
-  currentUnitId = id;
-
-  watchId = navigator.geolocation.watchPosition((pos) => {
-
-    const data = {
-      lat: pos.coords.latitude,
-      lon: pos.coords.longitude,
-      speed: pos.coords.speed || 0,
-      heading: pos.coords.heading || 0,
-      acc: pos.coords.accuracy,
-      status: window.unitStatus || "10-8",
-      time: Date.now()
-    };
-
-    unitsRef.child(id).set(data);
-
-  }, (err) => {
-    alert("GPS error: " + err.message);
-  }, {
-    enableHighAccuracy: true,
-    maximumAge: 0
-  });
-}
-
-//////////////////////////////////////////////////////
-// LOG OFF UNIT
-//////////////////////////////////////////////////////
-
-function logOffUnit() {
-  if (!currentUnitId) {
-    alert("No active unit");
-    return;
-  }
-
-  if (watchId) {
-    navigator.geolocation.clearWatch(watchId);
-    watchId = null;
-  }
-
-  unitsRef.child(currentUnitId).remove();
-  currentUnitId = null;
-
-  alert("Unit logged off");
-}
-
-//////////////////////////////////////////////////////
-// STATUS SYSTEM
-//////////////////////////////////////////////////////
-
-function setStatus(status) {
-  window.unitStatus = status;
-
-  if (currentUnitId) {
-    unitsRef.child(currentUnitId).update({
-      status: status,
-      time: Date.now()
-    });
-  }
-}
-
-//////////////////////////////////////////////////////
-// COLOR SYSTEM
-//////////////////////////////////////////////////////
-
-function getColor(status) {
-  switch(status) {
-    case "10-8": return "green";
-    case "10-7": return "red";
-    case "10-6": return "orange";
-    default: return "blue";
-  }
-}
-
-//////////////////////////////////////////////////////
-// LIVE DISPATCH VIEW
-//////////////////////////////////////////////////////
-
-unitsRef.on("value", (snap) => {
-
-  const data = snap.val();
-  const list = document.getElementById("unitList");
-
-  list.innerHTML = "";
-
-  if (!data) return;
-
-  Object.keys(data).forEach(id => {
-    const u = data[id];
-    if (!u) return;
-
-    const age = Date.now() - u.time;
-    const offline = age > 20000;
-
-    const color = getColor(u.status);
-
-    const div = document.createElement("div");
-    div.className = "unit" + (offline ? " offline" : "");
-
-    div.innerHTML = `
-      <b style="color:${color}">${id}</b><br>
-      ${u.status || "10-8"}<br>
-      ${offline ? "OFFLINE" : "ONLINE"}<br>
-      ${Math.round((u.speed || 0) * 2.237)} mph
-    `;
-
-    div.onclick = () => {
-      map.setView([u.lat, u.lon], 17);
-
-      document.getElementById("details").innerHTML = `
-        <b>Unit ${id}</b><br><br>
-        Status: ${u.status || "10-8"}<br>
-        Speed: ${Math.round((u.speed || 0) * 2.237)} mph<br>
-        Heading: ${u.heading || "N/A"}<br>
-        Accuracy: ${Math.round(u.acc || 0)} m<br>
-        Last update: ${new Date(u.time).toLocaleTimeString()}
-      `;
-    };
-
-    list.appendChild(div);
-
-    if (!markers[id]) {
-      markers[id] = L.circleMarker([u.lat, u.lon], {
-        radius: 8,
-        color: color,
-        fillColor: color,
-        fillOpacity: 0.8
-      }).addTo(map);
-    } else {
-      markers[id].setLatLng([u.lat, u.lon]);
-      markers[id].setStyle({ color: color, fillColor: color });
+    if (currentUnitId) {
+      unitsRef.child(currentUnitId).update({
+        status: status,
+        time: Date.now()
+      });
     }
-  });
-});
+  };
 
+  //////////////////////////////////////////////////////
+  // START UNIT
+  //////////////////////////////////////////////////////
+
+  window.startUnit = function () {
+    const id = document.getElementById("unitId").value.trim();
+    if (!id) return alert("Enter Unit ID");
+
+    currentUnitId = id;
+
+    watchId = navigator.geolocation.watchPosition((pos) => {
+
+      unitsRef.child(id).set({
+        lat: pos.coords.latitude,
+        lon: pos.coords.longitude,
+        speed: pos.coords.speed || 0,
+        heading: pos.coords.heading || 0,
+        acc: pos.coords.accuracy,
+        status: window.unitStatus,
+        time: Date.now()
+      });
+
+    }, (err) => {
+      alert(err.message);
+    }, {
+      enableHighAccuracy: true
+    });
+  };
+
+  //////////////////////////////////////////////////////
+  // LOGOFF
+  //////////////////////////////////////////////////////
+
+  window.logOffUnit = function () {
+    if (!currentUnitId) return alert("No active unit");
+
+    if (watchId) navigator.geolocation.clearWatch(watchId);
+
+    unitsRef.child(currentUnitId).remove();
+
+    currentUnitId = null;
+    watchId = null;
+
+    alert("Unit logged off");
+  };
+
+  //////////////////////////////////////////////////////
+  // DISPATCH LOOP
+  //////////////////////////////////////////////////////
+
+  unitsRef.on("value", (snap) => {
+
+    const data = snap.val();
+    const list = document.getElementById("unitList");
+
+    list.innerHTML = "";
+
+    if (!data) return;
+
+    Object.keys(data).forEach(id => {
+      const u = data[id];
+      if (!u) return;
+
+      const age = Date.now() - u.time;
+      const offline = age > 20000;
+
+      const div = document.createElement("div");
+      div.className = "unit" + (offline ? " offline" : "");
+
+      div.innerHTML = `
+        <b>${id}</b><br>
+        ${u.status}<br>
+        ${offline ? "OFFLINE" : "ONLINE"}<br>
+        ${Math.round((u.speed || 0) * 2.237)} mph
+      `;
+
+      div.onclick = () => {
+        map.setView([u.lat, u.lon], 17);
+
+        document.getElementById("details").innerHTML = `
+          <b>Unit ${id}</b><br><br>
+          Status: ${u.status}<br>
+          Speed: ${Math.round((u.speed || 0) * 2.237)} mph<br>
+          Accuracy: ${Math.round(u.acc || 0)} m<br>
+          Last update: ${new Date(u.time).toLocaleTimeString()}
+        `;
+      };
+
+      list.appendChild(div);
+
+      if (!markers[id]) {
+        markers[id] = L.circleMarker([u.lat, u.lon], {
+          radius: 8,
+          color: "green",
+          fillOpacity: 0.7
+        }).addTo(map);
+      } else {
+        markers[id].setLatLng([u.lat, u.lon]);
+      }
+    });
+  });
+
+});
 </script>
 
 </body>
