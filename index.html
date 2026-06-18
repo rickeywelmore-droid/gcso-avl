@@ -70,21 +70,21 @@
       color: white;
     }
 
-@media (max-width: 768px) {
-  #wrap {
-    flex-direction: column;
-  }
+    @media (max-width: 768px) {
+      #wrap {
+        flex-direction: column;
+      }
 
-  #sidebar {
-    width: 100%;
-    height: 40vh;
-    overflow-y: auto;
-  }
+      #sidebar {
+        width: 100%;
+        height: 40vh;
+        overflow-y: auto;
+      }
 
-  #map {
-    height: 60vh;
-  }
-}
+      #map {
+        height: 60vh;
+      }
+    }
   </style>
 </head>
 
@@ -126,6 +126,10 @@
 
     <hr>
 
+    <button onclick="logout()">Logout</button>
+
+    <hr>
+
     <div id="unitList"></div>
     <div id="details">Select a unit</div>
   </div>
@@ -137,6 +141,10 @@
 <script>
 document.addEventListener("DOMContentLoaded", function () {
 
+  //////////////////////////////////////////////////////
+  // STATE
+  //////////////////////////////////////////////////////
+
   let watchId = null;
   let currentUnitId = null;
   let markers = {};
@@ -144,20 +152,10 @@ document.addEventListener("DOMContentLoaded", function () {
 
   window.unitStatus = "10-8";
 
-  // LOGIN
-  window.login = function () {
-    const id = document.getElementById("loginUnitId").value.trim();
-    const mode = document.getElementById("loginMode").value;
-
-    if (!id) return alert("Enter ID");
-
-    currentUnitId = id;
-    userMode = mode;
-
-    document.getElementById("loginScreen").style.display = "none";
-  };
-
+  //////////////////////////////////////////////////////
   // FIREBASE
+  //////////////////////////////////////////////////////
+
   const firebaseConfig = {
     apiKey: "AIzaSyA5hXURTrwoUkMRBkI2iEYU74CsG4z_vcU",
     authDomain: "gcso-avl.firebaseapp.com",
@@ -169,25 +167,97 @@ document.addEventListener("DOMContentLoaded", function () {
   const db = firebase.database();
   const unitsRef = db.ref("units");
 
+  //////////////////////////////////////////////////////
+  // AUTO LOGIN (NEW)
+  //////////////////////////////////////////////////////
+
+  const savedId = localStorage.getItem("avl_unitId");
+  const savedMode = localStorage.getItem("avl_mode");
+
+  if (savedId) {
+    currentUnitId = savedId;
+    userMode = savedMode || "unit";
+
+    document.getElementById("loginScreen").style.display = "none";
+    console.log("Auto login restored:", savedId);
+  }
+
+  //////////////////////////////////////////////////////
   // MAP
+  //////////////////////////////////////////////////////
+
   const map = L.map('map').setView([38.9, -84.5], 10);
 
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19
   }).addTo(map);
 
-  // STATUS (FIXED - no timestamps)
+  //////////////////////////////////////////////////////
+  // LOGIN (UPDATED WITH STORAGE)
+  //////////////////////////////////////////////////////
+
+  window.login = function () {
+    const id = document.getElementById("loginUnitId").value.trim();
+    const mode = document.getElementById("loginMode").value;
+
+    if (!id) return alert("Enter ID");
+
+    currentUnitId = id;
+    userMode = mode;
+
+    localStorage.setItem("avl_unitId", id);
+    localStorage.setItem("avl_mode", mode);
+
+    document.getElementById("loginScreen").style.display = "none";
+
+    console.log("Logged in:", id, mode);
+  };
+
+  //////////////////////////////////////////////////////
+  // LOGOUT (NEW)
+  //////////////////////////////////////////////////////
+
+  window.logout = function () {
+
+    if (watchId) {
+      navigator.geolocation.clearWatch(watchId);
+      watchId = null;
+    }
+
+    if (currentUnitId) {
+      unitsRef.child(currentUnitId).remove();
+    }
+
+    currentUnitId = null;
+    userMode = null;
+
+    localStorage.removeItem("avl_unitId");
+    localStorage.removeItem("avl_mode");
+
+    document.getElementById("loginScreen").style.display = "flex";
+
+    alert("Logged out");
+  };
+
+  //////////////////////////////////////////////////////
+  // STATUS
+  //////////////////////////////////////////////////////
+
   window.setStatus = function(status) {
     window.unitStatus = status;
 
     if (currentUnitId) {
       unitsRef.child(currentUnitId).update({
-        status
+        status,
+        time: Date.now()
       });
     }
   };
 
-  // START UNIT (FIXED - gpsTime only)
+  //////////////////////////////////////////////////////
+  // START UNIT
+  //////////////////////////////////////////////////////
+
   window.startUnit = function () {
     const id = document.getElementById("unitId").value.trim();
     if (!id) return alert("Enter Unit ID");
@@ -203,8 +273,7 @@ document.addEventListener("DOMContentLoaded", function () {
         heading: pos.coords.heading || 0,
         acc: pos.coords.accuracy,
         status: window.unitStatus,
-
-        gpsTime: Date.now()
+        time: Date.now()
       });
 
     }, (err) => alert(err.message), {
@@ -212,7 +281,10 @@ document.addEventListener("DOMContentLoaded", function () {
     });
   };
 
+  //////////////////////////////////////////////////////
   // LOGOFF
+  //////////////////////////////////////////////////////
+
   window.logOffUnit = function () {
     if (!currentUnitId) return alert("No active unit");
 
@@ -226,7 +298,10 @@ document.addEventListener("DOMContentLoaded", function () {
     alert("Unit logged off");
   };
 
+  //////////////////////////////////////////////////////
   // FORCE REMOVE
+  //////////////////////////////////////////////////////
+
   window.forceRemoveUnit = function () {
 
     const id = currentUnitId || prompt("Enter Unit ID to remove:");
@@ -244,7 +319,10 @@ document.addEventListener("DOMContentLoaded", function () {
     alert("Unit removed");
   };
 
-  // DISPATCH LOOP (FIXED OFFLINE LOGIC)
+  //////////////////////////////////////////////////////
+  // DISPATCH LOOP
+  //////////////////////////////////////////////////////
+
   unitsRef.on("value", (snap) => {
 
     const data = snap.val();
@@ -258,8 +336,8 @@ document.addEventListener("DOMContentLoaded", function () {
       const u = data[id];
       if (!u) return;
 
-      const last = u.gpsTime || 0;
-      const offline = (Date.now() - last) > 30000;
+      const last = u.time || 0;
+      const offline = (Date.now() - last) > 20000;
 
       const color =
         u.status === "10-8" ? "green" :
@@ -285,7 +363,7 @@ document.addEventListener("DOMContentLoaded", function () {
           Status: ${u.status}<br>
           Speed: ${Math.round((u.speed || 0) * 2.237)} mph<br>
           Accuracy: ${Math.round(u.acc || 0)} m<br>
-          Last update: ${new Date(u.gpsTime).toLocaleTimeString()}
+          Last update: ${new Date(u.time).toLocaleTimeString()}
         `;
       };
 
