@@ -87,6 +87,7 @@
     <hr>
 
     <button onclick="logOffUnit()">Log Off Unit</button>
+    <button onclick="forceRemoveUnit()">Force Remove My Unit</button>
 
     <hr>
 
@@ -263,6 +264,32 @@ document.addEventListener("DOMContentLoaded", function () {
   });
 
 });
+  window.forceRemoveUnit = function () {
+
+  const id = currentUnitId || prompt("Enter Unit ID to remove:");
+
+  if (!id) return;
+
+  unitsRef.child(id).remove()
+    .then(() => {
+      console.log("Removed unit:", id);
+
+      if (watchId) {
+        navigator.geolocation.clearWatch(watchId);
+        watchId = null;
+      }
+
+      if (currentUnitId === id) {
+        currentUnitId = null;
+      }
+
+      alert("Unit removed from system");
+    })
+    .catch(err => {
+      console.error(err);
+      alert("Failed to remove unit");
+    });
+};
 </script>
 
 </body>
