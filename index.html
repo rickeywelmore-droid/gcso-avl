@@ -5,10 +5,8 @@
   <title>AVL Dispatch System</title>
 
   <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
-
   <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
 
-  <!-- Firebase (compat MUST load before JS) -->
   <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-database-compat.js"></script>
 
@@ -65,7 +63,6 @@
 
 <div id="wrap">
 
-  <!-- SIDEBAR -->
   <div id="sidebar">
     <h3>AVL Dispatch</h3>
 
@@ -75,28 +72,21 @@
 
     <hr>
 
-    <button onclick="setMode('dispatch')">Dispatch View</button>
-    <button onclick="setMode('unit')">Unit View</button>
-
-    <hr>
-
     <button onclick="setStatus('10-8')">10-8 Available</button>
-    <button onclick="setStatus('10-7')">10-7 Out of Service</button>
+    <button onclick="setStatus('10-7')">10-7 Out</button>
     <button onclick="setStatus('10-6')">10-6 Busy</button>
 
     <hr>
 
     <button onclick="logOffUnit()">Log Off Unit</button>
-    <button onclick="forceRemoveUnit()">Force Remove My Unit</button>
+    <button onclick="forceRemoveUnit()">Force Remove</button>
 
     <hr>
 
     <div id="unitList"></div>
-
     <div id="details">Select a unit</div>
   </div>
 
-  <!-- MAP -->
   <div id="map"></div>
 
 </div>
@@ -104,7 +94,14 @@
 <script>
 document.addEventListener("DOMContentLoaded", function () {
 
-  console.log("AVL boot sequence started");
+  //////////////////////////////////////////////////////
+  // STATE (GLOBAL SAFE EXPORT)
+  //////////////////////////////////////////////////////
+
+  let watchId = null;
+  let currentUnitId = null;
+  let markers = {};
+  window.unitStatus = "10-8";
 
   //////////////////////////////////////////////////////
   // FIREBASE
@@ -118,11 +115,8 @@ document.addEventListener("DOMContentLoaded", function () {
   };
 
   firebase.initializeApp(firebaseConfig);
-
   const db = firebase.database();
   const unitsRef = db.ref("units");
-
-  console.log("Firebase ready");
 
   //////////////////////////////////////////////////////
   // MAP
@@ -134,18 +128,6 @@ document.addEventListener("DOMContentLoaded", function () {
     maxZoom: 19
   }).addTo(map);
 
-  console.log("Map ready");
-
-  //////////////////////////////////////////////////////
-  // STATE
-  //////////////////////////////////////////////////////
-
-  let watchId = null;
-  let currentUnitId = null;
-  let markers = {};
-
-  window.unitStatus = "10-8";
-
   //////////////////////////////////////////////////////
   // STATUS
   //////////////////////////////////////////////////////
@@ -155,7 +137,7 @@ document.addEventListener("DOMContentLoaded", function () {
 
     if (currentUnitId) {
       unitsRef.child(currentUnitId).update({
-        status: status,
+        status,
         time: Date.now()
       });
     }
@@ -183,18 +165,17 @@ document.addEventListener("DOMContentLoaded", function () {
         time: Date.now()
       });
 
-    }, (err) => {
-      alert(err.message);
-    }, {
+    }, (err) => alert(err.message), {
       enableHighAccuracy: true
     });
   };
 
   //////////////////////////////////////////////////////
-  // LOGOFF
+  // LOGOFF (FIXED SAFE SCOPE)
   //////////////////////////////////////////////////////
 
   window.logOffUnit = function () {
+
     if (!currentUnitId) return alert("No active unit");
 
     if (watchId) navigator.geolocation.clearWatch(watchId);
@@ -205,6 +186,27 @@ document.addEventListener("DOMContentLoaded", function () {
     watchId = null;
 
     alert("Unit logged off");
+  };
+
+  //////////////////////////////////////////////////////
+  // FORCE REMOVE (FIXED SCOPE)
+  //////////////////////////////////////////////////////
+
+  window.forceRemoveUnit = function () {
+
+    const id = currentUnitId || prompt("Enter Unit ID to remove:");
+    if (!id) return;
+
+    if (watchId) navigator.geolocation.clearWatch(watchId);
+
+    unitsRef.child(id).remove();
+
+    if (currentUnitId === id) {
+      currentUnitId = null;
+      watchId = null;
+    }
+
+    alert("Unit removed");
   };
 
   //////////////////////////////////////////////////////
@@ -224,8 +226,7 @@ document.addEventListener("DOMContentLoaded", function () {
       const u = data[id];
       if (!u) return;
 
-      const age = Date.now() - u.time;
-      const offline = age > 20000;
+      const offline = (Date.now() - u.time) > 20000;
 
       const div = document.createElement("div");
       div.className = "unit" + (offline ? " offline" : "");
@@ -264,32 +265,6 @@ document.addEventListener("DOMContentLoaded", function () {
   });
 
 });
-  window.forceRemoveUnit = function () {
-
-  const id = currentUnitId || prompt("Enter Unit ID to remove:");
-
-  if (!id) return;
-
-  unitsRef.child(id).remove()
-    .then(() => {
-      console.log("Removed unit:", id);
-
-      if (watchId) {
-        navigator.geolocation.clearWatch(watchId);
-        watchId = null;
-      }
-
-      if (currentUnitId === id) {
-        currentUnitId = null;
-      }
-
-      alert("Unit removed from system");
-    })
-    .catch(err => {
-      console.error(err);
-      alert("Failed to remove unit");
-    });
-};
 </script>
 
 </body>
