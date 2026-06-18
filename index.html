@@ -1,10 +1,11 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Dispatch AVL System</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <meta charset="utf-8" />
+  <title>GCSO AVL</title>
 
   <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+
   <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
 
   <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
@@ -12,163 +13,135 @@
 
   <style>
     body { margin:0; font-family: Arial; display:flex; height:100vh; }
-
-    #sidebar {
-      width: 300px;
-      background: #111;
-      color: white;
-      overflow-y: auto;
-      padding: 10px;
-    }
-
+    #sidebar { width:320px; background:#111; color:white; padding:10px; overflow:auto; }
     #map { flex:1; }
-
-    .unit {
-      padding:10px;
-      margin:5px 0;
-      background:#222;
-      cursor:pointer;
-      border-left:4px solid limegreen;
-    }
-
-    .offline { border-left-color: red; }
-
-    #detail {
-      margin-top:10px;
-      padding:10px;
-      background:#1c1c1c;
-    }
-
-    input, button {
-      width:100%;
-      padding:8px;
-      margin:5px 0;
-    }
+    .unit { padding:8px; margin:5px 0; background:#222; cursor:pointer; }
+    .offline { border-left:4px solid red; }
+    input, button { width:100%; margin:5px 0; padding:8px; }
+    button { cursor:pointer; }
+    #detailsBox { margin-top:10px; padding:10px; background:#1c1c1c; }
   </style>
 </head>
 
 <body>
 
 <div id="sidebar">
+  <h3>GCSO AVL Dispatch</h3>
 
-  <h3>Dispatch AVL</h3>
-
-  <button onclick="setMode('dispatch')">Dispatch Mode</button>
-  <button onclick="setMode('unit')">Unit Mode</button>
-
-  <div id="unitLogin" style="display:none;">
-    <input id="unitId" placeholder="Unit ID (e.g. 101)" />
-    <button onclick="startUnit()">Start GPS</button>
-  </div>
+  <input id="unitId" placeholder="Unit ID (e.g. 101)" />
+  <button onclick="startUnit()">Start Unit Tracking</button>
 
   <div id="unitList"></div>
 
-  <div id="detail">
-    <b>Unit Details</b>
-    <div id="detailsBox">Click a unit</div>
-  </div>
-
+  <div id="detailsBox">Select a unit</div>
 </div>
 
 <div id="map"></div>
 
 <script>
 
-// ---------------- FIREBASE ----------------
-<!-- Firebase scripts -->
-<script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-database-compat.js"></script>
+//////////////////////////////////////////////////////
+// FIREBASE
+//////////////////////////////////////////////////////
 
-<script>
-  // Your config (THIS IS GOOD — keep yours)
-  const firebaseConfig = {
-    apiKey: "AIzaSyA5hXURTrwoUkMRBkI2iEYU74CsG4z_vcU",
-    authDomain: "gcso-avl.firebaseapp.com",
-    databaseURL: "https://gcso-avl-default-rtdb.firebaseio.com",
-    projectId: "gcso-avl",
-    storageBucket: "gcso-avl.firebasestorage.app",
-    messagingSenderId: "463504227099",
-    appId: "1:463504227099:web:9d522246b11892fc0731be",
-    measurementId: "G-XJN8PCBHYE"
-  };
+const firebaseConfig = {
+  apiKey: "AIzaSyA5hXURTrwoUkMRBkI2iEYU74CsG4z_vcU",
+  authDomain: "gcso-avl.firebaseapp.com",
+  databaseURL: "https://gcso-avl-default-rtdb.firebaseio.com",
+  projectId: "gcso-avl",
+  storageBucket: "gcso-avl.firebasestorage.app",
+  messagingSenderId: "463504227099",
+  appId: "1:463504227099:web:9d522246b11892fc0731be"
+};
 
-  // Initialize Firebase
-  firebase.initializeApp(firebaseConfig);
+firebase.initializeApp(firebaseConfig);
 
-  // THIS is what fixes your "unitsRef is not defined"
-  const db = firebase.database();
-  const unitsRef = db.ref("units");
+const db = firebase.database();
+const unitsRef = db.ref("units");
 
-  console.log("Firebase loaded successfully");
-</script>
+console.log("Firebase connected");
 
-// ---------------- MAP ----------------
-const map = L.map('map').setView([39, -84], 10);
+//////////////////////////////////////////////////////
+// MAP
+//////////////////////////////////////////////////////
+
+const map = L.map('map').setView([38.9, -84.5], 10);
 
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   maxZoom: 19
 }).addTo(map);
 
-// ---------------- STATE ----------------
-let mode = "dispatch";
 let markers = {};
-let selectedUnit = null;
 
-// ---------------- MODE SWITCH ----------------
-function setMode(m) {
-  mode = m;
-  document.getElementById("unitLogin").style.display =
-    (m === "unit") ? "block" : "none";
-}
+//////////////////////////////////////////////////////
+// UNIT MODE (GPS UPLOAD)
+//////////////////////////////////////////////////////
 
-// ---------------- UNIT MODE ----------------
 function startUnit() {
   const id = document.getElementById("unitId").value.trim();
   if (!id) return alert("Enter Unit ID");
 
-  navigator.geolocation.watchPosition(
-    (pos) => {
+  navigator.geolocation.watchPosition((pos) => {
 
-      const data = {
-        lat: pos.coords.latitude,
-        lon: pos.coords.longitude,
-        speed: pos.coords.speed,
-        heading: pos.coords.heading,
-        acc: pos.coords.accuracy,
-        time: Date.now()
-      };
+    const data = {
+      lat: pos.coords.latitude,
+      lon: pos.coords.longitude,
+      speed: pos.coords.speed || 0,
+      heading: pos.coords.heading || 0,
+      acc: pos.coords.accuracy,
+      time: Date.now()
+    };
 
-      unitsRef.child(id).set(data);
-    },
-    (err) => alert(err.message),
-    { enableHighAccuracy:true, maximumAge:0, timeout:5000 }
-  );
+    unitsRef.child(id).set(data);
+
+  }, (err) => {
+    alert("GPS Error: " + err.message);
+  }, {
+    enableHighAccuracy: true,
+    maximumAge: 0,
+    timeout: 10000
+  });
 }
 
-// ---------------- DISPATCH VIEW ----------------
+//////////////////////////////////////////////////////
+// DISPATCH MODE (LIVE VIEW)
+//////////////////////////////////////////////////////
+
 unitsRef.on("value", (snap) => {
   const data = snap.val();
-  if (!data) return;
-
   const list = document.getElementById("unitList");
+
   list.innerHTML = "";
+
+  if (!data) return;
 
   Object.keys(data).forEach(id => {
     const u = data[id];
+    if (!u) return;
 
     const age = Date.now() - u.time;
-    const isOffline = age > 15000;
+    const offline = age > 15000;
 
-    // sidebar list
+    // sidebar item
     const div = document.createElement("div");
-    div.className = "unit" + (isOffline ? " offline" : "");
+    div.className = "unit" + (offline ? " offline" : "");
     div.innerHTML = `
-      <b>${id}</b><br/>
-      ${isOffline ? "OFFLINE" : "ONLINE"}<br/>
-      Speed: ${u.speed ? Math.round(u.speed * 2.237) : 0} mph
+      <b>${id}</b><br>
+      ${offline ? "OFFLINE" : "ONLINE"}<br>
+      ${Math.round((u.speed || 0) * 2.237)} mph
     `;
 
-    div.onclick = () => showDetails(id, u);
+    div.onclick = () => {
+      map.setView([u.lat, u.lon], 17);
+
+      document.getElementById("detailsBox").innerHTML = `
+        <b>Unit ${id}</b><br><br>
+        Speed: ${Math.round((u.speed || 0) * 2.237)} mph<br>
+        Heading: ${u.heading || 0}<br>
+        Accuracy: ${Math.round(u.acc || 0)} m<br>
+        Last Update: ${new Date(u.time).toLocaleTimeString()}
+      `;
+    };
 
     list.appendChild(div);
 
@@ -180,19 +153,6 @@ unitsRef.on("value", (snap) => {
     }
   });
 });
-
-// ---------------- DETAILS PANEL ----------------
-function showDetails(id, u) {
-  selectedUnit = id;
-
-  document.getElementById("detailsBox").innerHTML = `
-    <b>${id}</b><br/>
-    Speed: ${u.speed ? Math.round(u.speed * 2.237) : 0} mph<br/>
-    Heading: ${u.heading || "N/A"}<br/>
-    Accuracy: ${u.acc} m<br/>
-    Last update: ${new Date(u.time).toLocaleTimeString()}
-  `;
-}
 
 </script>
 
