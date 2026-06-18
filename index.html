@@ -1,3 +1,107 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>AVL Dispatch System</title>
+
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
+  <!-- Firebase -->
+  <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-database-compat.js"></script>
+
+  <style>
+    html, body {
+      margin: 0;
+      height: 100%;
+      font-family: Arial;
+    }
+
+    #wrap {
+      display: flex;
+      height: 100%;
+    }
+
+    #sidebar {
+      width: 340px;
+      background: #111;
+      color: white;
+      padding: 10px;
+      overflow-y: auto;
+    }
+
+    #map {
+      flex: 1;
+    }
+
+    .unit {
+      background: #222;
+      padding: 8px;
+      margin: 6px 0;
+      cursor: pointer;
+    }
+
+    .offline {
+      border-left: 4px solid red;
+    }
+
+    input, button {
+      width: 100%;
+      padding: 8px;
+      margin: 5px 0;
+    }
+
+    #details {
+      margin-top: 10px;
+      padding: 10px;
+      background: #1c1c1c;
+    }
+  </style>
+</head>
+
+<body>
+
+<div id="wrap">
+
+  <!-- SIDEBAR -->
+  <div id="sidebar">
+    <h3>AVL Dispatch</h3>
+
+    <input id="unitId" placeholder="Unit ID (e.g. 101)" />
+
+    <button onclick="startUnit()">Start Tracking</button>
+
+    <hr>
+
+    <!-- DISPATCH CONTROLS -->
+    <button onclick="setMode('dispatch')">Dispatch View</button>
+    <button onclick="setMode('unit')">Unit View</button>
+
+    <hr>
+
+    <!-- STATUS CONTROLS -->
+    <button onclick="setStatus('10-8')">10-8 Available</button>
+    <button onclick="setStatus('10-7')">10-7 Out of Service</button>
+    <button onclick="setStatus('10-6')">10-6 Busy</button>
+
+    <hr>
+
+    <button onclick="logOffUnit()">Log Off Unit</button>
+
+    <hr>
+
+    <div id="unitList"></div>
+
+    <div id="details">Select a unit</div>
+  </div>
+
+  <!-- MAP -->
+  <div id="map"></div>
+
+</div>
+
 <script>
 
 ///////////////////////////////////////////////////////////
@@ -16,7 +120,7 @@ firebase.initializeApp(firebaseConfig);
 const db = firebase.database();
 const unitsRef = db.ref("units");
 
-console.log("AVL v2 online");
+console.log("AVL system online");
 
 ///////////////////////////////////////////////////////////
 // MAP
@@ -35,31 +139,27 @@ let markers = {};
 ///////////////////////////////////////////////////////////
 
 let watchId = null;
+let currentUnitId = null;
 let mode = "dispatch";
-let selectedUnit = null;
 
 ///////////////////////////////////////////////////////////
-// MODE SWITCHING
+// MODE SWITCH
 ///////////////////////////////////////////////////////////
 
 function setMode(m) {
   mode = m;
-
-  document.getElementById("unitId").style.display =
-    (m === "unit") ? "block" : "block"; // keep visible but structured
-
   console.log("Mode:", mode);
 }
 
 ///////////////////////////////////////////////////////////
-// UNIT LOGIN / TRACKING
+// UNIT START
 ///////////////////////////////////////////////////////////
 
 function startUnit() {
   const id = document.getElementById("unitId").value.trim();
   if (!id) return alert("Enter Unit ID");
 
-  window.currentUnitId = id;
+  currentUnitId = id;
 
   watchId = navigator.geolocation.watchPosition((pos) => {
 
@@ -75,45 +175,52 @@ function startUnit() {
 
     unitsRef.child(id).set(data);
 
-  }, (err) => alert(err.message), {
+  }, (err) => {
+    alert("GPS error: " + err.message);
+  }, {
     enableHighAccuracy: true,
     maximumAge: 0
   });
 }
 
+///////////////////////////////////////////////////////////
+// LOG OFF
+///////////////////////////////////////////////////////////
+
 function logOffUnit() {
-  const id = window.currentUnitId;
-  if (!id) return alert("No active unit");
+  if (!currentUnitId) {
+    alert("No active unit");
+    return;
+  }
 
-  if (watchId) navigator.geolocation.clearWatch(watchId);
+  if (watchId) {
+    navigator.geolocation.clearWatch(watchId);
+    watchId = null;
+  }
 
-  unitsRef.child(id).remove();
-
-  window.currentUnitId = null;
-  watchId = null;
+  unitsRef.child(currentUnitId).remove();
+  currentUnitId = null;
 
   alert("Unit logged off");
 }
 
 ///////////////////////////////////////////////////////////
-// STATUS SYSTEM (NEW)
+// STATUS
 ///////////////////////////////////////////////////////////
 
 function setStatus(status) {
   window.unitStatus = status;
 
-  if (window.currentUnitId) {
-    unitsRef.child(window.currentUnitId).update({
+  if (currentUnitId) {
+    unitsRef.child(currentUnitId).update({
       status: status,
       time: Date.now()
     });
   }
-
-  console.log("Status:", status);
 }
 
 ///////////////////////////////////////////////////////////
-// COLOR SYSTEM
+// COLOR
 ///////////////////////////////////////////////////////////
 
 function getColor(status) {
@@ -126,7 +233,7 @@ function getColor(status) {
 }
 
 ///////////////////////////////////////////////////////////
-// DISPATCH VIEW
+// LIVE DISPATCH VIEW
 ///////////////////////////////////////////////////////////
 
 unitsRef.on("value", (snap) => {
@@ -158,7 +265,6 @@ unitsRef.on("value", (snap) => {
     `;
 
     div.onclick = () => {
-      selectedUnit = id;
       map.setView([u.lat, u.lon], 17);
 
       document.getElementById("details").innerHTML = `
@@ -173,7 +279,6 @@ unitsRef.on("value", (snap) => {
 
     list.appendChild(div);
 
-    // MARKERS
     if (!markers[id]) {
       markers[id] = L.circleMarker([u.lat, u.lon], {
         radius: 8,
@@ -189,3 +294,6 @@ unitsRef.on("value", (snap) => {
 });
 
 </script>
+
+</body>
+</html>
