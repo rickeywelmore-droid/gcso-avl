@@ -287,7 +287,8 @@ document.addEventListener("DOMContentLoaded", function () {
       const u = data[id];
       if (!u) return;
 
-      const offline = (Date.now() - u.time) > 20000;
+      const last = u.time || 0;
+const offline = (Date.now() - last) > 20000;
 
       const color =
         u.status === "10-8" ? "green" :
