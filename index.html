@@ -4,10 +4,11 @@
   <meta charset="utf-8" />
   <title>GCSO AVL</title>
 
+  <!-- Leaflet -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
-
   <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
 
+  <!-- Firebase (IMPORTANT: HTML ONLY HERE) -->
   <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-database-compat.js"></script>
 
@@ -19,29 +20,28 @@
     .offline { border-left:4px solid red; }
     input, button { width:100%; margin:5px 0; padding:8px; }
     button { cursor:pointer; }
-    #detailsBox { margin-top:10px; padding:10px; background:#1c1c1c; }
+    #details { margin-top:10px; padding:10px; background:#1c1c1c; }
   </style>
 </head>
 
 <body>
 
 <div id="sidebar">
-  <h3>GCSO AVL Dispatch</h3>
+  <h3>GCSO AVL</h3>
 
   <input id="unitId" placeholder="Unit ID (e.g. 101)" />
-  <button onclick="startUnit()">Start Unit Tracking</button>
+  <button onclick="startUnit()">Start Tracking</button>
 
   <div id="unitList"></div>
 
-  <div id="detailsBox">Select a unit</div>
+  <div id="details">Select a unit</div>
 </div>
 
 <div id="map"></div>
 
 <script>
-
 //////////////////////////////////////////////////////
-// FIREBASE
+// FIREBASE INIT
 //////////////////////////////////////////////////////
 
 const firebaseConfig = {
@@ -59,10 +59,10 @@ firebase.initializeApp(firebaseConfig);
 const db = firebase.database();
 const unitsRef = db.ref("units");
 
-console.log("Firebase connected");
+console.log("Firebase ready");
 
 //////////////////////////////////////////////////////
-// MAP
+// MAP INIT
 //////////////////////////////////////////////////////
 
 const map = L.map('map').setView([38.9, -84.5], 10);
@@ -95,7 +95,7 @@ function startUnit() {
     unitsRef.child(id).set(data);
 
   }, (err) => {
-    alert("GPS Error: " + err.message);
+    alert("GPS error: " + err.message);
   }, {
     enableHighAccuracy: true,
     maximumAge: 0,
@@ -104,7 +104,7 @@ function startUnit() {
 }
 
 //////////////////////////////////////////////////////
-// DISPATCH MODE (LIVE VIEW)
+// DISPATCH VIEW (REALTIME)
 //////////////////////////////////////////////////////
 
 unitsRef.on("value", (snap) => {
@@ -122,9 +122,9 @@ unitsRef.on("value", (snap) => {
     const age = Date.now() - u.time;
     const offline = age > 15000;
 
-    // sidebar item
     const div = document.createElement("div");
     div.className = "unit" + (offline ? " offline" : "");
+
     div.innerHTML = `
       <b>${id}</b><br>
       ${offline ? "OFFLINE" : "ONLINE"}<br>
@@ -132,20 +132,20 @@ unitsRef.on("value", (snap) => {
     `;
 
     div.onclick = () => {
-      map.setView([u.lat, u.lon], 17);
+      map.setView([u.lat, u.lon], 16);
 
-      document.getElementById("detailsBox").innerHTML = `
+      document.getElementById("details").innerHTML = `
         <b>Unit ${id}</b><br><br>
         Speed: ${Math.round((u.speed || 0) * 2.237)} mph<br>
         Heading: ${u.heading || 0}<br>
         Accuracy: ${Math.round(u.acc || 0)} m<br>
-        Last Update: ${new Date(u.time).toLocaleTimeString()}
+        Last update: ${new Date(u.time).toLocaleTimeString()}
       `;
     };
 
     list.appendChild(div);
 
-    // map markers
+    // MARKERS
     if (!markers[id]) {
       markers[id] = L.marker([u.lat, u.lon]).addTo(map);
     } else {
