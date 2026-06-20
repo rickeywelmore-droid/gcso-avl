@@ -49,9 +49,56 @@
       word-break: break-word;
     }
 
+    #loginScreen {
+      position: fixed;
+      inset: 0;
+      background: #111;
+      color: white;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      z-index: 9999;
+      padding: 20px;
+    }
+
+    #loginScreen input,
+    #loginScreen select,
+    #loginScreen button {
+      max-width: 300px;
+    }
+
     .good { color: lime; }
     .bad { color: red; }
     .warn { color: orange; }
+
+    .police-car-marker {
+      background: transparent;
+      border: none;
+    }
+
+    .police-car-wrap {
+      width: 34px;
+      height: 34px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 28px;
+      transform-origin: center center;
+      filter: drop-shadow(0 1px 2px rgba(0,0,0,0.65));
+    }
+
+    .police-car-badge {
+      width: 42px;
+      height: 42px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: 3px solid lime;
+      background: rgba(0,0,0,0.55);
+      box-sizing: border-box;
+    }
 
     @media (max-width: 768px) {
       #wrap {
@@ -72,12 +119,34 @@
 
 <body>
 
+<!-- LOGIN -->
+<div id="loginScreen">
+  <h2>Gallatin County Sheriff's Office AVL</h2>
+
+  <input id="loginUnitId" placeholder="Unit ID" />
+
+  <select id="loginMode">
+    <option value="unit">Unit</option>
+    <option value="dispatch">Dispatch</option>
+  </select>
+
+  <button onclick="login()">Enter System</button>
+</div>
+
 <div id="wrap">
 
   <div id="sidebar">
     <h3>Gallatin County Sheriff's Office AVL</h3>
 
     <input id="unitId" placeholder="Unit ID" />
+
+    <hr>
+
+    <button onclick="setUnitStatus('10-8')">10-8 Available</button>
+    <button onclick="setUnitStatus('10-7')">10-7 Out</button>
+    <button onclick="setUnitStatus('10-6')">10-6 Busy</button>
+
+    <hr>
 
     <label>Baud Rate</label>
     <select id="baudRate">
@@ -91,7 +160,12 @@
     <button onclick="disconnectSerialGPS()">Disconnect Serial GPS</button>
     <button onclick="startBrowserGPS()">Start Browser GPS Fallback</button>
     <button onclick="centerOnUnit()">Center On My Unit</button>
-    <button onclick="removeUnit()">Remove Unit</button>
+
+    <hr>
+
+    <button onclick="logOffUnit()">Log Off Unit</button>
+    <button onclick="forceRemoveUnit()">Force Remove Unit</button>
+    <button onclick="logout()">Logout</button>
 
     <div id="gpsStatus">GPS: Disconnected</div>
     <div id="fixDetails">Fix details will appear here.</div>
@@ -130,6 +204,93 @@ L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
 
 let markers = {};
 let currentUnitId = null;
+let currentStatus = "10-8";
+let userMode = "unit";
+let browserWatchId = null;
+
+//////////////////////////////////////////////////////
+// LOGIN / SESSION
+//////////////////////////////////////////////////////
+
+function restoreLogin() {
+  const savedId = localStorage.getItem("avl_unitId");
+  const savedMode = localStorage.getItem("avl_mode");
+
+  if (!savedId) return;
+
+  currentUnitId = savedId;
+  userMode = savedMode || "unit";
+
+  document.getElementById("unitId").value = savedId;
+  document.getElementById("loginScreen").style.display = "none";
+
+  setStatus(`Session restored for ${savedId}`, "good");
+}
+
+function login() {
+  const id = document.getElementById("loginUnitId").value.trim();
+  const mode = document.getElementById("loginMode").value;
+
+  if (!id) return alert("Enter ID");
+
+  currentUnitId = id;
+  userMode = mode;
+
+  localStorage.setItem("avl_unitId", id);
+  localStorage.setItem("avl_mode", mode);
+
+  document.getElementById("unitId").value = id;
+  document.getElementById("loginScreen").style.display = "none";
+
+  setStatus(`Logged in as ${id} (${mode})`, "good");
+}
+
+async function logout() {
+  if (browserWatchId !== null) {
+    navigator.geolocation.clearWatch(browserWatchId);
+    browserWatchId = null;
+  }
+
+  await disconnectSerialGPS();
+
+  if (currentUnitId) {
+    await unitsRef.child(currentUnitId).remove();
+  }
+
+  if (currentUnitId && markers[currentUnitId]) {
+    map.removeLayer(markers[currentUnitId]);
+    delete markers[currentUnitId];
+  }
+
+  currentUnitId = null;
+  userMode = null;
+
+  localStorage.removeItem("avl_unitId");
+  localStorage.removeItem("avl_mode");
+
+  document.getElementById("unitId").value = "";
+  document.getElementById("loginScreen").style.display = "flex";
+
+  setStatus("Logged out", "warn");
+}
+
+restoreLogin();
+
+//////////////////////////////////////////////////////
+// STATUS BUTTONS
+//////////////////////////////////////////////////////
+
+function setUnitStatus(status) {
+  currentStatus = status;
+
+  if (currentUnitId) {
+    unitsRef.child(currentUnitId).update({
+      status: currentStatus
+    });
+  }
+
+  setStatus(`Status set to ${status}`, "good");
+}
 
 //////////////////////////////////////////////////////
 // WAKE LOCK / BACKGROUND SAFEGUARDS
@@ -168,7 +329,6 @@ window.addEventListener("beforeunload", (e) => {
   e.returnValue =
     "Tracking will stop if Gallatin County Sheriff's Office AVL is closed.";
 });
-
 
 //////////////////////////////////////////////////////
 // SERIAL STATE
@@ -222,6 +382,8 @@ async function connectSerialGPS() {
   }
 
   currentUnitId = id;
+  localStorage.setItem("avl_unitId", id);
+  localStorage.setItem("avl_mode", userMode || "unit");
 
   try {
     const baudRate = parseInt(document.getElementById("baudRate").value, 10);
@@ -403,7 +565,7 @@ function parseRMC(sentence) {
     speed: speedKnots * 0.514444, // m/s for compatibility with browser GPS
     heading,
     acc: 5,
-    status: "SERIAL GPS",
+    status: currentStatus,
     gpsSource: "serial-rmc",
     gpsTime: Date.now()
   };
@@ -441,7 +603,7 @@ function parseGGA(sentence) {
     speed: lastFix?.speed || 0,
     heading: lastFix?.heading || 0,
     acc: hdop ? Math.round(hdop * 5) : 10,
-    status: "SERIAL GPS",
+    status: currentStatus,
     gpsSource: "serial-gga",
     satellites,
     hdop,
@@ -505,6 +667,7 @@ function publishFix(data) {
 
   setFixDetails(
     `Unit: ${currentUnitId}\n` +
+    `Status: ${data.status}\n` +
     `Lat: ${data.lat.toFixed(6)}\n` +
     `Lon: ${data.lon.toFixed(6)}\n` +
     `Speed: ${Math.round((data.speed || 0) * 2.237)} mph\n` +
@@ -519,6 +682,38 @@ function publishFix(data) {
 // MAP UPDATE
 //////////////////////////////////////////////////////
 
+function markerColor(status, source) {
+  if (source && source.startsWith("serial")) return "lime";
+  if (status === "10-7") return "red";
+  if (status === "10-6") return "orange";
+  if (status === "10-8") return "green";
+  return "blue";
+}
+
+function getHeadingDegrees(data) {
+  const heading = Number(data.heading || 0);
+  if (Number.isNaN(heading)) return 0;
+  return heading;
+}
+
+function getPoliceCarIcon(data) {
+  const color = markerColor(data.status, data.gpsSource);
+  const heading = getHeadingDegrees(data);
+
+  return L.divIcon({
+    className: "police-car-marker",
+    html: `
+      <div class="police-car-badge" style="border-color:${color}">
+        <div class="police-car-wrap" style="transform: rotate(${heading}deg);">🚓</div>
+      </div>
+    `,
+    iconSize: [42, 42],
+    iconAnchor: [21, 21],
+    popupAnchor: [0, -22],
+    tooltipAnchor: [0, -22]
+  });
+}
+
 function updateMap(id, data) {
   const speedMph = Math.round((data.speed || 0) * 2.237);
   const updated = data.gpsTime
@@ -530,15 +725,15 @@ function updateMap(id, data) {
     Status: ${data.status || "N/A"}<br>
     Source: ${data.gpsSource || "unknown"}<br>
     Speed: ${speedMph} mph<br>
+    Heading: ${Math.round(data.heading || 0)}°<br>
     Updated: ${updated}
   `;
 
+  const icon = getPoliceCarIcon(data);
+
   if (!markers[id]) {
-    markers[id] = L.circleMarker([data.lat, data.lon], {
-      radius: 8,
-      color: "lime",
-      fillColor: "lime",
-      fillOpacity: 0.8
+    markers[id] = L.marker([data.lat, data.lon], {
+      icon: icon
     }).addTo(map);
 
     markers[id].bindTooltip(`Unit ${id}`, {
@@ -549,6 +744,7 @@ function updateMap(id, data) {
 
   } else {
     markers[id].setLatLng([data.lat, data.lon]);
+    markers[id].setIcon(icon);
     markers[id].setPopupContent(popupHtml);
   }
 
@@ -588,15 +784,21 @@ function startBrowserGPS() {
   if (!id) return alert("Enter Unit ID first");
 
   currentUnitId = id;
+  localStorage.setItem("avl_unitId", id);
+  localStorage.setItem("avl_mode", userMode || "unit");
 
-  navigator.geolocation.watchPosition((pos) => {
+  if (browserWatchId !== null) {
+    navigator.geolocation.clearWatch(browserWatchId);
+  }
+
+  browserWatchId = navigator.geolocation.watchPosition((pos) => {
     const data = {
       lat: pos.coords.latitude,
       lon: pos.coords.longitude,
       speed: pos.coords.speed || 0,
       heading: pos.coords.heading || 0,
       acc: pos.coords.accuracy,
-      status: "BROWSER GPS",
+      status: currentStatus,
       gpsSource: "browser",
       gpsTime: Date.now()
     };
@@ -616,21 +818,64 @@ function startBrowserGPS() {
 }
 
 //////////////////////////////////////////////////////
-// REMOVE UNIT
+// LOG OFF / REMOVE UNIT
 //////////////////////////////////////////////////////
 
-function removeUnit() {
+async function logOffUnit() {
   const id = currentUnitId || document.getElementById("unitId").value.trim();
   if (!id) return alert("Enter Unit ID first");
 
-  unitsRef.child(id).remove();
+  if (browserWatchId !== null) {
+    navigator.geolocation.clearWatch(browserWatchId);
+    browserWatchId = null;
+  }
+
+  await disconnectSerialGPS();
+
+  await unitsRef.child(id).remove();
 
   if (markers[id]) {
     map.removeLayer(markers[id]);
     delete markers[id];
   }
 
-  setStatus("Unit removed", "warn");
+  currentUnitId = null;
+
+  setStatus("Unit logged off", "warn");
+  setFixDetails("Unit logged off.");
+}
+
+async function forceRemoveUnit() {
+  const id = currentUnitId || prompt("Enter Unit ID to remove:");
+  if (!id) return;
+
+  if (browserWatchId !== null && id === currentUnitId) {
+    navigator.geolocation.clearWatch(browserWatchId);
+    browserWatchId = null;
+  }
+
+  if (id === currentUnitId) {
+    await disconnectSerialGPS();
+  }
+
+  await unitsRef.child(id).remove();
+
+  if (markers[id]) {
+    map.removeLayer(markers[id]);
+    delete markers[id];
+  }
+
+  if (id === currentUnitId) {
+    currentUnitId = null;
+  }
+
+  setStatus(`Unit ${id} removed`, "warn");
+  setFixDetails(`Unit ${id} removed.`);
+}
+
+// Backward-compatible alias for old Remove Unit button behavior.
+function removeUnit() {
+  forceRemoveUnit();
 }
 </script>
 
