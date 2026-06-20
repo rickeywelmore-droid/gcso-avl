@@ -90,7 +90,8 @@
     <button onclick="connectSerialGPS()">Connect Serial GPS</button>
     <button onclick="disconnectSerialGPS()">Disconnect Serial GPS</button>
     <button onclick="startBrowserGPS()">Start Browser GPS Fallback</button>
-    <button onclick="removeUnit()">Remove Unit</button>
+    <button onclick="logOffUnit()">Log Off Unit</button>
+    <button onclick="removeUnit()">Force Remove Unit</button>
 
     <div id="gpsStatus">GPS: Disconnected</div>
     <div id="fixDetails">Fix details will appear here.</div>
@@ -129,6 +130,7 @@ L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
 
 let markers = {};
 let currentUnitId = null;
+let browserWatchId = null;
 
 //////////////////////////////////////////////////////
 // SERIAL STATE
@@ -566,7 +568,12 @@ function startBrowserGPS() {
 
   currentUnitId = id;
 
-  navigator.geolocation.watchPosition((pos) => {
+  if (browserWatchId) {
+    navigator.geolocation.clearWatch(browserWatchId);
+    browserWatchId = null;
+  }
+
+  browserWatchId = navigator.geolocation.watchPosition((pos) => {
     const data = {
       lat: pos.coords.latitude,
       lon: pos.coords.longitude,
@@ -593,21 +600,75 @@ function startBrowserGPS() {
 }
 
 //////////////////////////////////////////////////////
-// REMOVE UNIT
+// LOG OFF / REMOVE UNIT
 //////////////////////////////////////////////////////
 
-function removeUnit() {
+async function logOffUnit() {
   const id = currentUnitId || document.getElementById("unitId").value.trim();
   if (!id) return alert("Enter Unit ID first");
 
-  unitsRef.child(id).remove();
+  try {
+    // Stop browser GPS fallback if it is running
+    if (browserWatchId) {
+      navigator.geolocation.clearWatch(browserWatchId);
+      browserWatchId = null;
+    }
 
-  if (markers[id]) {
-    map.removeLayer(markers[id]);
-    delete markers[id];
+    // Stop serial GPS if it is running
+    if (serialPort || serialReader) {
+      await disconnectSerialGPS();
+    }
+
+    // Remove this unit from Firebase
+    await unitsRef.child(id).remove();
+
+    // Remove marker from local map
+    if (markers[id]) {
+      map.removeLayer(markers[id]);
+      delete markers[id];
+    }
+
+    if (currentUnitId === id) {
+      currentUnitId = null;
+    }
+
+    document.getElementById("unitId").value = "";
+    setFixDetails("Unit logged off and removed from Firebase.");
+    setStatus("Unit logged off", "warn");
+
+  } catch (err) {
+    console.error(err);
+    setStatus("Log off failed: " + err.message, "bad");
+    alert("Log off failed: " + err.message);
   }
+}
 
-  setStatus("Unit removed", "warn");
+async function removeUnit() {
+  const typed = document.getElementById("unitId").value.trim();
+  const id = currentUnitId || typed || prompt("Enter Unit ID to remove:");
+  if (!id) return;
+
+  try {
+    await unitsRef.child(id).remove();
+
+    if (markers[id]) {
+      map.removeLayer(markers[id]);
+      delete markers[id];
+    }
+
+    if (currentUnitId === id) {
+      currentUnitId = null;
+    }
+
+    setFixDetails(`Removed unit: ${id}`);
+    setStatus(`Unit ${id} removed`, "warn");
+    alert(`Unit ${id} removed`);
+
+  } catch (err) {
+    console.error(err);
+    setStatus("Remove failed: " + err.message, "bad");
+    alert("Remove failed: " + err.message);
+  }
 }
 </script>
 
