@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>AVL Dispatch System</title>
+  <title>AVL Serial GPS Alpha</title>
 
   <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
   <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
@@ -23,7 +23,7 @@
     }
 
     #sidebar {
-      width: 340px;
+      width: 360px;
       background: #111;
       color: white;
       padding: 10px;
@@ -34,41 +34,24 @@
       flex: 1;
     }
 
-    .unit {
-      background: #222;
-      padding: 8px;
-      margin: 6px 0;
-      cursor: pointer;
-    }
-
-    .offline {
-      border-left: 4px solid red;
-    }
-
     input, button, select {
       width: 100%;
       padding: 8px;
       margin: 5px 0;
     }
 
-    #details {
+    #gpsStatus, #fixDetails, #rawNmea {
       margin-top: 10px;
-      padding: 10px;
+      padding: 8px;
       background: #1c1c1c;
+      font-size: 12px;
+      white-space: pre-wrap;
+      word-break: break-word;
     }
 
-    /* LOGIN SCREEN */
-    #loginScreen {
-      position: fixed;
-      inset: 0;
-      background: #111;
-      display: flex;
-      flex-direction: column;
-      justify-content: center;
-      align-items: center;
-      z-index: 9999;
-      color: white;
-    }
+    .good { color: lime; }
+    .bad { color: red; }
+    .warn { color: orange; }
 
     @media (max-width: 768px) {
       #wrap {
@@ -77,12 +60,11 @@
 
       #sidebar {
         width: 100%;
-        height: 40vh;
-        overflow-y: auto;
+        height: 45vh;
       }
 
       #map {
-        height: 60vh;
+        height: 55vh;
       }
     }
   </style>
@@ -90,48 +72,29 @@
 
 <body>
 
-<!-- LOGIN -->
-<div id="loginScreen">
-  <h2>AVL Login</h2>
-
-  <input id="loginUnitId" placeholder="Unit ID" />
-
-  <select id="loginMode">
-    <option value="unit">Unit</option>
-    <option value="dispatch">Dispatch</option>
-  </select>
-
-  <button onclick="login()">Enter System</button>
-</div>
-
 <div id="wrap">
 
   <div id="sidebar">
-    <h3>AVL Dispatch</h3>
+    <h3>Serial GPS Alpha</h3>
 
-    <input id="unitId" placeholder="Unit ID (e.g. 101)" />
+    <input id="unitId" placeholder="Unit ID" />
 
-    <button onclick="startUnit()">Start Tracking</button>
+    <label>Baud Rate</label>
+    <select id="baudRate">
+      <option value="4800">4800</option>
+      <option value="9600" selected>9600</option>
+      <option value="38400">38400</option>
+      <option value="115200">115200</option>
+    </select>
 
-    <hr>
+    <button onclick="connectSerialGPS()">Connect Serial GPS</button>
+    <button onclick="disconnectSerialGPS()">Disconnect Serial GPS</button>
+    <button onclick="startBrowserGPS()">Start Browser GPS Fallback</button>
+    <button onclick="removeUnit()">Remove Unit</button>
 
-    <button onclick="setStatus('10-8')">10-8 Available</button>
-    <button onclick="setStatus('10-7')">10-7 Out</button>
-    <button onclick="setStatus('10-6')">10-6 Busy</button>
-
-    <hr>
-
-    <button onclick="logOffUnit()">Log Off Unit</button>
-    <button onclick="forceRemoveUnit()">Force Remove</button>
-
-    <hr>
-
-    <button onclick="logout()">Logout</button>
-
-    <hr>
-
-    <div id="unitList"></div>
-    <div id="details">Select a unit</div>
+    <div id="gpsStatus">GPS: Disconnected</div>
+    <div id="fixDetails">Fix details will appear here.</div>
+    <div id="rawNmea">Raw NMEA will appear here.</div>
   </div>
 
   <div id="map"></div>
@@ -139,251 +102,451 @@
 </div>
 
 <script>
-document.addEventListener("DOMContentLoaded", function () {
+//////////////////////////////////////////////////////
+// FIREBASE
+//////////////////////////////////////////////////////
 
-  //////////////////////////////////////////////////////
-  // STATE
-  //////////////////////////////////////////////////////
+const firebaseConfig = {
+  apiKey: "AIzaSyA5hXURTrwoUkMRBkI2iEYU74CsG4z_vcU",
+  authDomain: "gcso-avl.firebaseapp.com",
+  databaseURL: "https://gcso-avl-default-rtdb.firebaseio.com",
+  projectId: "gcso-avl"
+};
 
-  let watchId = null;
-  let currentUnitId = null;
-  let markers = {};
-  let userMode = "unit";
+firebase.initializeApp(firebaseConfig);
+const db = firebase.database();
+const unitsRef = db.ref("units");
 
-  window.unitStatus = "10-8";
+//////////////////////////////////////////////////////
+// MAP
+//////////////////////////////////////////////////////
 
-  //////////////////////////////////////////////////////
-  // FIREBASE
-  //////////////////////////////////////////////////////
+const map = L.map("map").setView([38.9, -84.5], 10);
 
-  const firebaseConfig = {
-    apiKey: "AIzaSyA5hXURTrwoUkMRBkI2iEYU74CsG4z_vcU",
-    authDomain: "gcso-avl.firebaseapp.com",
-    databaseURL: "https://gcso-avl-default-rtdb.firebaseio.com",
-    projectId: "gcso-avl"
-  };
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  maxZoom: 19
+}).addTo(map);
 
-  firebase.initializeApp(firebaseConfig);
-  const db = firebase.database();
-  const unitsRef = db.ref("units");
+let markers = {};
+let currentUnitId = null;
 
-  //////////////////////////////////////////////////////
-  // AUTO LOGIN (NEW)
-  //////////////////////////////////////////////////////
+//////////////////////////////////////////////////////
+// SERIAL STATE
+//////////////////////////////////////////////////////
 
-  const savedId = localStorage.getItem("avl_unitId");
-  const savedMode = localStorage.getItem("avl_mode");
+let serialPort = null;
+let serialReader = null;
+let serialKeepReading = false;
+let serialBuffer = "";
 
-  if (savedId) {
-    currentUnitId = savedId;
-    userMode = savedMode || "unit";
+let lastValidFixTime = 0;
+let lastFix = null;
 
-    document.getElementById("loginScreen").style.display = "none";
-    console.log("Auto login restored:", savedId);
+//////////////////////////////////////////////////////
+// BROWSER SUPPORT CHECK
+//////////////////////////////////////////////////////
+
+if (!("serial" in navigator)) {
+  setStatus("Web Serial not supported. Use Chrome or Edge.", "bad");
+}
+
+//////////////////////////////////////////////////////
+// STATUS HELPERS
+//////////////////////////////////////////////////////
+
+function setStatus(message, className = "") {
+  const el = document.getElementById("gpsStatus");
+  el.className = className;
+  el.innerText = message;
+}
+
+function setFixDetails(message) {
+  document.getElementById("fixDetails").innerText = message;
+}
+
+function setRawNmea(sentence) {
+  document.getElementById("rawNmea").innerText = sentence;
+}
+
+//////////////////////////////////////////////////////
+// CONNECT SERIAL GPS
+//////////////////////////////////////////////////////
+
+async function connectSerialGPS() {
+  const id = document.getElementById("unitId").value.trim();
+  if (!id) return alert("Enter Unit ID first");
+
+  if (!("serial" in navigator)) {
+    alert("Web Serial is not supported in this browser. Use Chrome or Edge.");
+    return;
   }
 
-  //////////////////////////////////////////////////////
-  // MAP
-  //////////////////////////////////////////////////////
+  currentUnitId = id;
 
-  const map = L.map('map').setView([38.9, -84.5], 10);
+  try {
+    const baudRate = parseInt(document.getElementById("baudRate").value, 10);
 
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    maxZoom: 19
-  }).addTo(map);
+    serialPort = await navigator.serial.requestPort();
 
-  //////////////////////////////////////////////////////
-  // LOGIN (UPDATED WITH STORAGE)
-  //////////////////////////////////////////////////////
-
-  window.login = function () {
-    const id = document.getElementById("loginUnitId").value.trim();
-    const mode = document.getElementById("loginMode").value;
-
-    if (!id) return alert("Enter ID");
-
-    currentUnitId = id;
-    userMode = mode;
-
-    localStorage.setItem("avl_unitId", id);
-    localStorage.setItem("avl_mode", mode);
-
-    document.getElementById("loginScreen").style.display = "none";
-
-    console.log("Logged in:", id, mode);
-  };
-
-  //////////////////////////////////////////////////////
-  // LOGOUT (NEW)
-  //////////////////////////////////////////////////////
-
-  window.logout = function () {
-
-    if (watchId) {
-      navigator.geolocation.clearWatch(watchId);
-      watchId = null;
-    }
-
-    if (currentUnitId) {
-      unitsRef.child(currentUnitId).remove();
-    }
-
-    currentUnitId = null;
-    userMode = null;
-
-    localStorage.removeItem("avl_unitId");
-    localStorage.removeItem("avl_mode");
-
-    document.getElementById("loginScreen").style.display = "flex";
-
-    alert("Logged out");
-  };
-
-  //////////////////////////////////////////////////////
-  // STATUS
-  //////////////////////////////////////////////////////
-
-  window.setStatus = function(status) {
-    window.unitStatus = status;
-
-    if (currentUnitId) {
-      unitsRef.child(currentUnitId).update({
-        status,
-        time: Date.now()
-      });
-    }
-  };
-
-  //////////////////////////////////////////////////////
-  // START UNIT
-  //////////////////////////////////////////////////////
-
-  window.startUnit = function () {
-    const id = document.getElementById("unitId").value.trim();
-    if (!id) return alert("Enter Unit ID");
-
-    currentUnitId = id;
-
-    watchId = navigator.geolocation.watchPosition((pos) => {
-
-      unitsRef.child(id).set({
-        lat: pos.coords.latitude,
-        lon: pos.coords.longitude,
-        speed: pos.coords.speed || 0,
-        heading: pos.coords.heading || 0,
-        acc: pos.coords.accuracy,
-        status: window.unitStatus,
-        time: Date.now()
-      });
-
-    }, (err) => alert(err.message), {
-      enableHighAccuracy: true
+    await serialPort.open({
+      baudRate: baudRate,
+      dataBits: 8,
+      stopBits: 1,
+      parity: "none",
+      flowControl: "none"
     });
-  };
 
-  //////////////////////////////////////////////////////
-  // LOGOFF
-  //////////////////////////////////////////////////////
+    setStatus(`Serial GPS connected at ${baudRate} baud`, "good");
 
-  window.logOffUnit = function () {
-    if (!currentUnitId) return alert("No active unit");
+    serialKeepReading = true;
+    readSerialLoop();
 
-    if (watchId) navigator.geolocation.clearWatch(watchId);
+  } catch (err) {
+    console.error(err);
+    setStatus("Serial GPS connection failed: " + err.message, "bad");
+    alert("Serial GPS connection failed: " + err.message);
+  }
+}
 
-    unitsRef.child(currentUnitId).remove();
+//////////////////////////////////////////////////////
+// DISCONNECT SERIAL GPS
+//////////////////////////////////////////////////////
 
-    currentUnitId = null;
-    watchId = null;
+async function disconnectSerialGPS() {
+  serialKeepReading = false;
 
-    alert("Unit logged off");
-  };
-
-  //////////////////////////////////////////////////////
-  // FORCE REMOVE
-  //////////////////////////////////////////////////////
-
-  window.forceRemoveUnit = function () {
-
-    const id = currentUnitId || prompt("Enter Unit ID to remove:");
-    if (!id) return;
-
-    if (watchId) navigator.geolocation.clearWatch(watchId);
-
-    unitsRef.child(id).remove();
-
-    if (currentUnitId === id) {
-      currentUnitId = null;
-      watchId = null;
+  try {
+    if (serialReader) {
+      await serialReader.cancel();
+      serialReader.releaseLock();
+      serialReader = null;
     }
 
-    alert("Unit removed");
-  };
+    if (serialPort) {
+      await serialPort.close();
+      serialPort = null;
+    }
 
-  //////////////////////////////////////////////////////
-  // DISPATCH LOOP
-  //////////////////////////////////////////////////////
+    setStatus("Serial GPS disconnected", "warn");
 
-  unitsRef.on("value", (snap) => {
+  } catch (err) {
+    console.error(err);
+    setStatus("Disconnect error: " + err.message, "bad");
+  }
+}
 
-    const data = snap.val();
-    const list = document.getElementById("unitList");
+//////////////////////////////////////////////////////
+// READ SERIAL LOOP
+//////////////////////////////////////////////////////
 
-    list.innerHTML = "";
+async function readSerialLoop() {
+  const decoder = new TextDecoder();
 
-    if (!data) return;
+  try {
+    while (serialPort && serialPort.readable && serialKeepReading) {
+      serialReader = serialPort.readable.getReader();
 
-    Object.keys(data).forEach(id => {
-      const u = data[id];
-      if (!u) return;
+      try {
+        while (serialKeepReading) {
+          const { value, done } = await serialReader.read();
 
-      const last = u.time || 0;
-      const offline = (Date.now() - last) > 20000;
+          if (done) break;
+          if (!value) continue;
 
-      const color =
-        u.status === "10-8" ? "green" :
-        u.status === "10-7" ? "red" :
-        u.status === "10-6" ? "orange" :
-        "blue";
+          serialBuffer += decoder.decode(value, { stream: true });
 
-      const div = document.createElement("div");
-      div.className = "unit" + (offline ? " offline" : "");
+          let lines = serialBuffer.split(/\r?\n/);
+          serialBuffer = lines.pop();
 
-      div.innerHTML = `
-        <b style="color:${color}">${id}</b><br>
-        ${u.status}<br>
-        ${offline ? "OFFLINE" : "ONLINE"}<br>
-        ${Math.round((u.speed || 0) * 2.237)} mph
-      `;
-
-      div.onclick = () => {
-        map.setView([u.lat, u.lon], 17);
-
-        document.getElementById("details").innerHTML = `
-          <b>Unit ${id}</b><br><br>
-          Status: ${u.status}<br>
-          Speed: ${Math.round((u.speed || 0) * 2.237)} mph<br>
-          Accuracy: ${Math.round(u.acc || 0)} m<br>
-          Last update: ${new Date(u.time).toLocaleTimeString()}
-        `;
-      };
-
-      list.appendChild(div);
-
-      if (!markers[id]) {
-        markers[id] = L.circleMarker([u.lat, u.lon], {
-          radius: 8,
-          color: color,
-          fillColor: color,
-          fillOpacity: 0.8
-        }).addTo(map);
-      } else {
-        markers[id].setLatLng([u.lat, u.lon]);
-        markers[id].setStyle({ color, fillColor: color });
+          for (const rawLine of lines) {
+            const sentence = rawLine.trim();
+            if (sentence) handleNMEA(sentence);
+          }
+        }
+      } finally {
+        serialReader.releaseLock();
+        serialReader = null;
       }
-    });
-  });
+    }
+  } catch (err) {
+    console.error(err);
+    setStatus("Serial read error: " + err.message, "bad");
+  }
+}
 
-});
+//////////////////////////////////////////////////////
+// NMEA HANDLER
+//////////////////////////////////////////////////////
+
+function handleNMEA(sentence) {
+  setRawNmea(sentence);
+
+  if (!sentence.startsWith("$")) return;
+
+  if (!isChecksumValid(sentence)) {
+    setStatus("Bad NMEA checksum ignored", "warn");
+    return;
+  }
+
+  const type = sentence.split(",")[0];
+
+  if (
+    type === "$GPRMC" ||
+    type === "$GNRMC" ||
+    type === "$GARMC" ||
+    type === "$GLRMC"
+  ) {
+    parseRMC(sentence);
+    return;
+  }
+
+  if (
+    type === "$GPGGA" ||
+    type === "$GNGGA" ||
+    type === "$GAGGA" ||
+    type === "$GLGGA"
+  ) {
+    parseGGA(sentence);
+    return;
+  }
+}
+
+//////////////////////////////////////////////////////
+// CHECKSUM VALIDATION
+//////////////////////////////////////////////////////
+
+function isChecksumValid(sentence) {
+  const star = sentence.indexOf("*");
+
+  // Some receivers omit checksum. Do not kill the feed for that.
+  if (star === -1) return true;
+
+  const data = sentence.substring(1, star);
+  const supplied = sentence.substring(star + 1).trim().toUpperCase();
+
+  let checksum = 0;
+  for (let i = 0; i < data.length; i++) {
+    checksum ^= data.charCodeAt(i);
+  }
+
+  const calculated = checksum.toString(16).toUpperCase().padStart(2, "0");
+  return calculated === supplied;
+}
+
+//////////////////////////////////////////////////////
+// RMC PARSER
+//////////////////////////////////////////////////////
+
+function parseRMC(sentence) {
+  const parts = sentence.split(",");
+
+  const fixStatus = parts[2]; // A = valid, V = void
+  if (fixStatus !== "A") {
+    setStatus("RMC received but fix is not valid", "warn");
+    return;
+  }
+
+  const lat = nmeaToDecimal(parts[3], parts[4], true);
+  const lon = nmeaToDecimal(parts[5], parts[6], false);
+
+  if (!isValidLatLon(lat, lon)) {
+    setStatus("Invalid RMC coordinates ignored", "warn");
+    return;
+  }
+
+  const speedKnots = parseFloat(parts[7]) || 0;
+  const heading = parseFloat(parts[8]) || 0;
+
+  const data = {
+    lat,
+    lon,
+    speed: speedKnots * 0.514444, // m/s for compatibility with browser GPS
+    heading,
+    acc: 5,
+    status: "SERIAL GPS",
+    gpsSource: "serial-rmc",
+    gpsTime: Date.now()
+  };
+
+  publishFix(data);
+}
+
+//////////////////////////////////////////////////////
+// GGA PARSER
+//////////////////////////////////////////////////////
+
+function parseGGA(sentence) {
+  const parts = sentence.split(",");
+
+  const fixQuality = parseInt(parts[6], 10); // 0 invalid, 1 GPS, 2 DGPS, etc.
+  if (!fixQuality || fixQuality === 0) {
+    setStatus("GGA received but no valid fix", "warn");
+    return;
+  }
+
+  const lat = nmeaToDecimal(parts[2], parts[3], true);
+  const lon = nmeaToDecimal(parts[4], parts[5], false);
+
+  if (!isValidLatLon(lat, lon)) {
+    setStatus("Invalid GGA coordinates ignored", "warn");
+    return;
+  }
+
+  const satellites = parseInt(parts[7], 10) || 0;
+  const hdop = parseFloat(parts[8]) || null;
+
+  const data = {
+    lat,
+    lon,
+    speed: lastFix?.speed || 0,
+    heading: lastFix?.heading || 0,
+    acc: hdop ? Math.round(hdop * 5) : 10,
+    status: "SERIAL GPS",
+    gpsSource: "serial-gga",
+    satellites,
+    hdop,
+    gpsTime: Date.now()
+  };
+
+  publishFix(data);
+}
+
+//////////////////////////////////////////////////////
+// NMEA COORDINATE CONVERSION
+//////////////////////////////////////////////////////
+
+function nmeaToDecimal(raw, direction, isLatitude) {
+  if (!raw || !direction) return null;
+
+  const degreeLength = isLatitude ? 2 : 3;
+  const degrees = parseInt(raw.substring(0, degreeLength), 10);
+  const minutes = parseFloat(raw.substring(degreeLength));
+
+  if (Number.isNaN(degrees) || Number.isNaN(minutes)) return null;
+
+  let decimal = degrees + (minutes / 60);
+
+  if (direction === "S" || direction === "W") {
+    decimal *= -1;
+  }
+
+  return decimal;
+}
+
+function isValidLatLon(lat, lon) {
+  return (
+    typeof lat === "number" &&
+    typeof lon === "number" &&
+    !Number.isNaN(lat) &&
+    !Number.isNaN(lon) &&
+    lat >= -90 &&
+    lat <= 90 &&
+    lon >= -180 &&
+    lon <= 180
+  );
+}
+
+//////////////////////////////////////////////////////
+// PUBLISH FIX
+//////////////////////////////////////////////////////
+
+function publishFix(data) {
+  if (!currentUnitId) return;
+
+  lastValidFixTime = Date.now();
+  lastFix = data;
+
+  unitsRef.child(currentUnitId).set(data);
+  updateMap(currentUnitId, data);
+
+  const age = new Date(data.gpsTime).toLocaleTimeString();
+
+  setStatus("Serial GPS valid fix", "good");
+
+  setFixDetails(
+    `Unit: ${currentUnitId}\n` +
+    `Lat: ${data.lat.toFixed(6)}\n` +
+    `Lon: ${data.lon.toFixed(6)}\n` +
+    `Speed: ${Math.round((data.speed || 0) * 2.237)} mph\n` +
+    `Heading: ${data.heading || 0}\n` +
+    `Accuracy est: ${data.acc} m\n` +
+    `Source: ${data.gpsSource}\n` +
+    `Updated: ${age}`
+  );
+}
+
+//////////////////////////////////////////////////////
+// MAP UPDATE
+//////////////////////////////////////////////////////
+
+function updateMap(id, data) {
+  if (!markers[id]) {
+    markers[id] = L.circleMarker([data.lat, data.lon], {
+      radius: 8,
+      color: "lime",
+      fillColor: "lime",
+      fillOpacity: 0.8
+    }).addTo(map);
+  } else {
+    markers[id].setLatLng([data.lat, data.lon]);
+  }
+
+  map.setView([data.lat, data.lon], 17);
+}
+
+//////////////////////////////////////////////////////
+// BROWSER GPS FALLBACK
+//////////////////////////////////////////////////////
+
+function startBrowserGPS() {
+  const id = document.getElementById("unitId").value.trim();
+  if (!id) return alert("Enter Unit ID first");
+
+  currentUnitId = id;
+
+  navigator.geolocation.watchPosition((pos) => {
+    const data = {
+      lat: pos.coords.latitude,
+      lon: pos.coords.longitude,
+      speed: pos.coords.speed || 0,
+      heading: pos.coords.heading || 0,
+      acc: pos.coords.accuracy,
+      status: "BROWSER GPS",
+      gpsSource: "browser",
+      gpsTime: Date.now()
+    };
+
+    unitsRef.child(id).set(data);
+    updateMap(id, data);
+
+    setStatus("Browser GPS active", "good");
+
+  }, (err) => {
+    setStatus("Browser GPS error: " + err.message, "bad");
+  }, {
+    enableHighAccuracy: true,
+    maximumAge: 0,
+    timeout: 10000
+  });
+}
+
+//////////////////////////////////////////////////////
+// REMOVE UNIT
+//////////////////////////////////////////////////////
+
+function removeUnit() {
+  const id = currentUnitId || document.getElementById("unitId").value.trim();
+  if (!id) return alert("Enter Unit ID first");
+
+  unitsRef.child(id).remove();
+
+  if (markers[id]) {
+    map.removeLayer(markers[id]);
+    delete markers[id];
+  }
+
+  setStatus("Unit removed", "warn");
+}
 </script>
 
 </body>
