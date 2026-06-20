@@ -100,6 +100,36 @@
       box-sizing: border-box;
     }
 
+    body.dark {
+      background: #050505;
+      color: #e6e6e6;
+    }
+
+    body.dark #sidebar {
+      background: #050505;
+      color: #e6e6e6;
+    }
+
+    body.dark input,
+    body.dark button,
+    body.dark select {
+      background: #1b1b1b;
+      color: #ffffff;
+      border: 1px solid #444;
+    }
+
+    body.dark #gpsStatus,
+    body.dark #fixDetails,
+    body.dark #rawNmea {
+      background: #0d0d0d;
+      color: #e6e6e6;
+    }
+
+    body.dark #loginScreen {
+      background: #050505;
+      color: #e6e6e6;
+    }
+
     @media (max-width: 768px) {
       #wrap {
         flex-direction: column;
@@ -137,6 +167,8 @@
 
   <div id="sidebar">
     <h3>Gallatin County Sheriff's Office AVL</h3>
+
+    <button onclick="toggleDarkMode()">Toggle Dark Mode</button>
 
     <input id="unitId" placeholder="Unit ID" />
 
@@ -198,9 +230,38 @@ const unitsRef = db.ref("units");
 
 const map = L.map("map").setView([38.9, -84.5], 10);
 
-L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+let lightTiles = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
   maxZoom: 19
 }).addTo(map);
+
+let darkTiles = L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
+  maxZoom: 19,
+  attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
+});
+
+let darkMode = localStorage.getItem("avl_darkMode") === "true";
+
+function applyDarkMode() {
+  document.body.classList.toggle("dark", darkMode);
+
+  if (darkMode) {
+    if (map.hasLayer(lightTiles)) map.removeLayer(lightTiles);
+    if (!map.hasLayer(darkTiles)) darkTiles.addTo(map);
+  } else {
+    if (map.hasLayer(darkTiles)) map.removeLayer(darkTiles);
+    if (!map.hasLayer(lightTiles)) lightTiles.addTo(map);
+  }
+
+  localStorage.setItem("avl_darkMode", darkMode ? "true" : "false");
+  setTimeout(() => map.invalidateSize(), 200);
+}
+
+function toggleDarkMode() {
+  darkMode = !darkMode;
+  applyDarkMode();
+}
+
+applyDarkMode();
 
 let markers = {};
 let currentUnitId = null;
