@@ -143,6 +143,43 @@ let lastValidFixTime = 0;
 let lastFix = null;
 
 //////////////////////////////////////////////////////
+// WAKE LOCK + BACKGROUND SAFEGUARDS
+//////////////////////////////////////////////////////
+
+let wakeLock = null;
+
+async function enableWakeLock() {
+  if (!("wakeLock" in navigator)) {
+    console.log("Wake Lock not supported in this browser");
+    return;
+  }
+
+  try {
+    wakeLock = await navigator.wakeLock.request("screen");
+    console.log("Wake Lock active");
+  } catch (err) {
+    console.log("Wake Lock failed:", err.message);
+  }
+}
+
+enableWakeLock();
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") {
+    enableWakeLock();
+
+    setTimeout(() => {
+      map.invalidateSize();
+    }, 300);
+  }
+});
+
+window.addEventListener("beforeunload", (e) => {
+  e.preventDefault();
+  e.returnValue = "AVL tracking will stop if this tab is closed.";
+});
+
+//////////////////////////////////////////////////////
 // BROWSER SUPPORT CHECK
 //////////////////////////////////////////////////////
 
@@ -480,6 +517,18 @@ function publishFix(data) {
 //////////////////////////////////////////////////////
 
 function updateMap(id, data) {
+  const source = data.gpsSource || "unknown";
+  const speedMph = Math.round((data.speed || 0) * 2.237);
+  const updated = data.gpsTime ? new Date(data.gpsTime).toLocaleTimeString() : "N/A";
+
+  const popupHtml = `
+    <b>Unit ${id}</b><br>
+    Source: ${source}<br>
+    Status: ${data.status || "N/A"}<br>
+    Speed: ${speedMph} mph<br>
+    Updated: ${updated}
+  `;
+
   if (!markers[id]) {
     markers[id] = L.circleMarker([data.lat, data.lon], {
       radius: 8,
@@ -487,8 +536,21 @@ function updateMap(id, data) {
       fillColor: "lime",
       fillOpacity: 0.8
     }).addTo(map);
+
+    markers[id].bindPopup(popupHtml);
+
+    markers[id].bindTooltip(`Unit ${id}`, {
+      permanent: false,
+      direction: "top"
+    });
+
+    markers[id].on("click", () => {
+      markers[id].openPopup();
+    });
+
   } else {
     markers[id].setLatLng([data.lat, data.lon]);
+    markers[id].setPopupContent(popupHtml);
   }
 
   map.setView([data.lat, data.lon], 17);
