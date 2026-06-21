@@ -72,6 +72,23 @@
     .bad { color: red; }
     .warn { color: orange; }
 
+
+    .unit {
+      background: #222;
+      padding: 8px;
+      margin: 6px 0;
+      cursor: pointer;
+      border-left: 4px solid #333;
+    }
+
+    .unit.offline {
+      border-left-color: red;
+    }
+
+    body.dark .unit {
+      background: #151515;
+    }
+
     .police-car-marker {
       background: transparent;
       border: none;
@@ -198,6 +215,10 @@
     <button onclick="logOffUnit()">Log Off Unit</button>
     <button onclick="forceRemoveUnit()">Force Remove Unit</button>
     <button onclick="logout()">Logout</button>
+
+    <hr>
+
+    <div id="unitList"></div>
 
     <div id="gpsStatus">GPS: Disconnected</div>
     <div id="fixDetails">Fix details will appear here.</div>
@@ -835,6 +856,66 @@ function centerOnUnit() {
   map.setView(marker.getLatLng(), 17);
   marker.openPopup();
 }
+
+//////////////////////////////////////////////////////
+// LIVE UNIT LIST / OTHER UNITS ON MAP
+//////////////////////////////////////////////////////
+
+unitsRef.on("value", (snap) => {
+  const data = snap.val() || {};
+  const list = document.getElementById("unitList");
+
+  if (list) list.innerHTML = "";
+
+  // Remove markers for units that no longer exist in Firebase
+  Object.keys(markers).forEach((id) => {
+    if (!data[id]) {
+      map.removeLayer(markers[id]);
+      delete markers[id];
+    }
+  });
+
+  Object.keys(data).forEach((id) => {
+    const u = data[id];
+    if (!u || typeof u.lat !== "number" || typeof u.lon !== "number") return;
+
+    updateMap(id, u);
+
+    if (!list) return;
+
+    const last = u.gpsTime || u.time || 0;
+    const offline = last ? (Date.now() - last) > 30000 : true;
+    const speedMph = Math.round((u.speed || 0) * 2.237);
+    const updated = last ? new Date(last).toLocaleTimeString() : "Unknown";
+
+    const div = document.createElement("div");
+    div.className = "unit" + (offline ? " offline" : "");
+    div.innerHTML = `
+      <b>Unit ${id}</b><br>
+      ${u.status || "N/A"}<br>
+      ${offline ? "OFFLINE" : "ONLINE"}<br>
+      Source: ${u.gpsSource || "unknown"}<br>
+      Speed: ${speedMph} mph
+    `;
+
+    div.onclick = () => {
+      map.setView([u.lat, u.lon], 17);
+      if (markers[id]) markers[id].openPopup();
+      setFixDetails(
+        `Unit: ${id}\n` +
+        `Status: ${u.status || "N/A"}\n` +
+        `Source: ${u.gpsSource || "unknown"}\n` +
+        `Lat: ${u.lat.toFixed(6)}\n` +
+        `Lon: ${u.lon.toFixed(6)}\n` +
+        `Speed: ${speedMph} mph\n` +
+        `Heading: ${Math.round(u.heading || 0)}°\n` +
+        `Updated: ${updated}`
+      );
+    };
+
+    list.appendChild(div);
+  });
+});
 
 //////////////////////////////////////////////////////
 // BROWSER GPS FALLBACK
