@@ -191,12 +191,6 @@
 
     <hr>
 
-    <button onclick="setUnitStatus('10-8')">10-8 Available</button>
-    <button onclick="setUnitStatus('10-7')">10-7 Out</button>
-    <button onclick="setUnitStatus('10-6')">10-6 Busy</button>
-
-    <hr>
-
     <label>Baud Rate</label>
     <select id="baudRate">
       <option value="4800">4800</option>
@@ -287,7 +281,6 @@ applyDarkMode();
 
 let markers = {};
 let currentUnitId = null;
-let currentStatus = "10-8";
 let userMode = "unit";
 let browserWatchId = null;
 
@@ -358,23 +351,6 @@ async function logout() {
 }
 
 restoreLogin();
-
-//////////////////////////////////////////////////////
-// STATUS BUTTONS
-//////////////////////////////////////////////////////
-
-function setUnitStatus(status) {
-  currentStatus = status;
-
-  if (currentUnitId) {
-    unitsRef.child(currentUnitId).update({
-      status: currentStatus
-    });
-  }
-
-  setStatus(`Status set to ${status}`, "good");
-}
-
 //////////////////////////////////////////////////////
 // WAKE LOCK / BACKGROUND SAFEGUARDS
 //////////////////////////////////////////////////////
@@ -849,7 +825,6 @@ function parseRMC(sentence) {
     speed: speedKnots * 0.514444, // m/s for compatibility with browser GPS
     heading,
     acc: 5,
-    status: currentStatus,
     gpsSource: "serial-external-rmc",
     gpsTime: Date.now()
   };
@@ -887,7 +862,6 @@ function parseGGA(sentence) {
     speed: lastFix?.speed || 0,
     heading: lastFix?.heading || 0,
     acc: hdop ? Math.round(hdop * 5) : 10,
-    status: currentStatus,
     gpsSource: "serial-external-gga",
     satellites,
     hdop,
@@ -951,13 +925,13 @@ function publishFix(data) {
 
   setFixDetails(
     `Unit: ${currentUnitId}\n` +
-    `Status: ${data.status}\n` +
     `Lat: ${data.lat.toFixed(6)}\n` +
     `Lon: ${data.lon.toFixed(6)}\n` +
     `Speed: ${Math.round((data.speed || 0) * 2.237)} mph\n` +
     `Heading: ${data.heading || 0}\n` +
     `Accuracy est: ${data.acc} m\n` +
-    `Source: ${data.gpsSource}\n` +
+    `GPS: ${formatGpsSource(data.gpsSource)}\n` +
+    (data.satellites ? `Satellites: ${data.satellites}\n` : "") +
     `Updated: ${age}`
   );
 }
@@ -966,12 +940,10 @@ function publishFix(data) {
 // MAP UPDATE
 //////////////////////////////////////////////////////
 
-function markerColor(status, source) {
+function markerColor(source) {
   if (source && source.startsWith("serial")) return "lime";
-  if (status === "10-7") return "red";
-  if (status === "10-6") return "orange";
-  if (status === "10-8") return "green";
-  return "blue";
+  if (source === "browser") return "deepskyblue";
+  return "gray";
 }
 
 function getHeadingDegrees(data) {
@@ -981,7 +953,7 @@ function getHeadingDegrees(data) {
 }
 
 function getPoliceCarIcon(data) {
-  const color = markerColor(data.status, data.gpsSource);
+  const color = markerColor(data.gpsSource);
   const heading = getHeadingDegrees(data);
 
   return L.divIcon({
@@ -1006,8 +978,9 @@ function updateMap(id, data) {
 
   const popupHtml = `
     <b>Unit ${id}</b><br>
-    Status: ${data.status || "N/A"}<br>
-    Source: ${data.gpsSource || "unknown"}<br>
+    Health: ${getUnitHealthLabel(data)}<br>
+    Source: ${formatGpsSource(data.gpsSource)}<br>
+    ${data.satellites ? `Satellites: ${data.satellites}<br>` : ""}
     Speed: ${speedMph} mph<br>
     Heading: ${Math.round(data.heading || 0)}°<br>
     Updated: ${updated}
@@ -1059,6 +1032,35 @@ function centerOnUnit() {
   marker.openPopup();
 }
 
+function isUnitOffline(data) {
+  const last = data.gpsTime || data.time || 0;
+  return last ? (Date.now() - last) > 30000 : true;
+}
+
+function getUnitHealthLabel(data) {
+  return isUnitOffline(data) ? "OFFLINE" : "ONLINE";
+}
+
+function formatGpsSource(source) {
+  if (!source) return "unknown";
+  if (source.startsWith("serial")) return "External GPS";
+  if (source === "browser") return "Browser fallback";
+  return source;
+}
+
+function formatLastUpdateAge(timestamp) {
+  if (!timestamp) return "Unknown";
+
+  const seconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
+  if (seconds < 60) return `${seconds} sec ago`;
+
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} min ago`;
+
+  const hours = Math.round(minutes / 60);
+  return `${hours} hr ago`;
+}
+
 //////////////////////////////////////////////////////
 // LIVE UNIT LIST / OTHER UNITS ON MAP
 //////////////////////////////////////////////////////
@@ -1086,17 +1088,20 @@ unitsRef.on("value", (snap) => {
     if (!list) return;
 
     const last = u.gpsTime || u.time || 0;
-    const offline = last ? (Date.now() - last) > 30000 : true;
+    const offline = isUnitOffline(u);
     const speedMph = Math.round((u.speed || 0) * 2.237);
     const updated = last ? new Date(last).toLocaleTimeString() : "Unknown";
+    const updateAge = formatLastUpdateAge(last);
+    const sourceLabel = formatGpsSource(u.gpsSource);
+    const satLine = u.satellites ? `<br>Satellites: ${u.satellites}` : "";
 
     const div = document.createElement("div");
     div.className = "unit" + (offline ? " offline" : "");
     div.innerHTML = `
       <b>Unit ${id}</b><br>
-      ${u.status || "N/A"}<br>
-      ${offline ? "OFFLINE" : "ONLINE"}<br>
-      Source: ${u.gpsSource || "unknown"}<br>
+      <strong>${offline ? "OFFLINE" : "ONLINE"}</strong><br>
+      GPS: ${sourceLabel}<br>
+      Last update: ${updateAge}${satLine}<br>
       Speed: ${speedMph} mph
     `;
 
@@ -1105,12 +1110,14 @@ unitsRef.on("value", (snap) => {
       if (markers[id]) markers[id].openPopup();
       setFixDetails(
         `Unit: ${id}\n` +
-        `Status: ${u.status || "N/A"}\n` +
-        `Source: ${u.gpsSource || "unknown"}\n` +
+        `Health: ${offline ? "OFFLINE" : "ONLINE"}\n` +
+        `GPS: ${sourceLabel}\n` +
+        (u.satellites ? `Satellites: ${u.satellites}\n` : "") +
         `Lat: ${u.lat.toFixed(6)}\n` +
         `Lon: ${u.lon.toFixed(6)}\n` +
         `Speed: ${speedMph} mph\n` +
         `Heading: ${Math.round(u.heading || 0)}°\n` +
+        `Last update: ${updateAge}\n` +
         `Updated: ${updated}`
       );
     };
@@ -1142,8 +1149,7 @@ function startBrowserGPS() {
       speed: pos.coords.speed || 0,
       heading: pos.coords.heading || 0,
       acc: pos.coords.accuracy,
-      status: currentStatus,
-      gpsSource: "browser",
+        gpsSource: "browser",
       gpsTime: Date.now()
     };
 
