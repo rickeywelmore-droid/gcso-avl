@@ -85,6 +85,18 @@
       border-left-color: red;
     }
 
+    .unit.gps-active {
+      border-left-color: lime;
+    }
+
+    .unit.logged-in-only {
+      border-left-color: orange;
+    }
+
+    .mode-hidden {
+      display: none !important;
+    }
+
     body.dark .unit {
       background: #151515;
     }
@@ -187,28 +199,31 @@
 
     <button onclick="toggleDarkMode()">Toggle Dark Mode</button>
 
-    <input id="unitId" placeholder="Unit ID" />
+    <input id="unitId" placeholder="Unit ID / Dispatch Name" />
 
-    <hr>
+    <div id="unitGpsControls">
+      <hr>
 
-    <label>Baud Rate</label>
-    <select id="baudRate">
-      <option value="4800">4800</option>
-      <option value="9600" selected>9600</option>
-      <option value="38400">38400</option>
-      <option value="115200">115200</option>
-    </select>
+      <label>Baud Rate</label>
+      <select id="baudRate">
+        <option value="4800">4800</option>
+        <option value="9600" selected>9600</option>
+        <option value="38400">38400</option>
+        <option value="115200">115200</option>
+      </select>
 
-    <button onclick="connectSerialGPS()">Auto Detect External GPS</button>
-    <button onclick="grantSerialGPSPermission()">Grant GPS Permission / Add Receiver</button>
-    <button onclick="disconnectSerialGPS()">Disconnect External GPS</button>
-    <button onclick="startBrowserGPS()">Start Browser GPS Fallback</button>
-    <button onclick="centerOnUnit()">Center On My Unit</button>
+      <button onclick="connectSerialGPS()">Auto Detect External GPS</button>
+      <button onclick="grantSerialGPSPermission()">Grant GPS Permission / Add Receiver</button>
+      <button onclick="disconnectSerialGPS()">Disconnect External GPS</button>
+      <button onclick="startBrowserGPS()">Start Browser GPS Fallback</button>
+      <button onclick="centerOnUnit()">Center On My Unit</button>
 
-    <hr>
+      <hr>
 
-    <button onclick="logOffUnit()">Log Off Unit</button>
-    <button onclick="forceRemoveUnit()">Force Remove Unit</button>
+      <button onclick="logOffUnit()">Log Off Unit</button>
+      <button onclick="forceRemoveUnit()">Force Remove Unit</button>
+    </div>
+
     <button onclick="logout()">Logout</button>
 
     <hr>
@@ -239,6 +254,7 @@ const firebaseConfig = {
 firebase.initializeApp(firebaseConfig);
 const db = firebase.database();
 const unitsRef = db.ref("units");
+const sessionsRef = db.ref("sessions");
 
 //////////////////////////////////////////////////////
 // MAP
@@ -283,13 +299,70 @@ let markers = {};
 let currentUnitId = null;
 let userMode = "unit";
 let browserWatchId = null;
+let presenceTimer = null;
+let latestUnits = {};
+let latestSessions = {};
+let renderUnitListTimer = null;
+
+const SESSION_STALE_MS = 2 * 60 * 1000; // logged-in heartbeat grace period
+
+// A unit should only show OFFLINE after no GPS data has been received for this long.
+const UNIT_OFFLINE_MS = 15 * 60 * 1000; // 15 minutes
+let unitListRenderTimer = null;
+let latestUnitsSnapshot = {};
 
 //////////////////////////////////////////////////////
 // LOGIN / SESSION
 //////////////////////////////////////////////////////
 
-function restoreLogin() {
-  const savedId = localStorage.getItem("avl_unitId");
+
+function applyModeUi() {
+  const gpsControls = document.getElementById("unitGpsControls");
+  const unitIdInput = document.getElementById("unitId");
+
+  if (gpsControls) gpsControls.classList.toggle("mode-hidden", userMode === "dispatch");
+  if (unitIdInput) unitIdInput.placeholder = userMode === "dispatch" ? "Dispatch Name" : "Unit ID";
+
+  if (userMode === "dispatch") {
+    setFixDetails("Dispatch view only. GPS controls are hidden.");
+  }
+}
+
+function startPresenceHeartbeat() {
+  if (!currentUnitId) return;
+
+  if (presenceTimer) {
+    clearInterval(presenceTimer);
+    presenceTimer = null;
+  }
+
+  publishPresence();
+  presenceTimer = setInterval(publishPresence, 30000);
+}
+
+function publishPresence() {
+  if (!currentUnitId) return;
+
+  sessionsRef.child(currentUnitId).set({
+    mode: userMode || "unit",
+    loggedIn: true,
+    lastSeen: Date.now(),
+    loginTime: firebase.database.ServerValue.TIMESTAMP
+  });
+}
+
+async function stopPresence(remove = true) {
+  if (presenceTimer) {
+    clearInterval(presenceTimer);
+    presenceTimer = null;
+  }
+
+  if (remove && currentUnitId) {
+    await sessionsRef.child(currentUnitId).remove().catch(() => {});
+  }
+}
+
+function restoreLogin() {  const savedId = localStorage.getItem("avl_unitId");
   const savedMode = localStorage.getItem("avl_mode");
 
   if (!savedId) return;
@@ -300,14 +373,17 @@ function restoreLogin() {
   document.getElementById("unitId").value = savedId;
   document.getElementById("loginScreen").style.display = "none";
 
+  applyModeUi();
+  startPresenceHeartbeat();
   setStatus(`Session restored for ${savedId}`, "good");
 }
 
 function login() {
-  const id = document.getElementById("loginUnitId").value.trim();
+  const enteredId = document.getElementById("loginUnitId").value.trim();
   const mode = document.getElementById("loginMode").value;
+  const id = enteredId || (mode === "dispatch" ? "Dispatch" : "");
 
-  if (!id) return alert("Enter ID");
+  if (!id) return alert("Enter Unit ID");
 
   currentUnitId = id;
   userMode = mode;
@@ -318,6 +394,8 @@ function login() {
   document.getElementById("unitId").value = id;
   document.getElementById("loginScreen").style.display = "none";
 
+  applyModeUi();
+  startPresenceHeartbeat();
   setStatus(`Logged in as ${id} (${mode})`, "good");
 }
 
@@ -328,8 +406,9 @@ async function logout() {
   }
 
   await disconnectSerialGPS();
+  await stopPresence(true);
 
-  if (currentUnitId) {
+  if (currentUnitId && userMode !== "dispatch") {
     await unitsRef.child(currentUnitId).remove();
   }
 
@@ -346,6 +425,7 @@ async function logout() {
 
   document.getElementById("unitId").value = "";
   document.getElementById("loginScreen").style.display = "flex";
+  applyModeUi();
 
   setStatus("Logged out", "warn");
 }
@@ -502,6 +582,7 @@ async function grantSerialGPSPermission() {
 //////////////////////////////////////////////////////
 
 async function connectSerialGPS(isRetry = false) {
+  if (userMode === "dispatch") return alert("Dispatch view is view-only. GPS controls are disabled.");
   const id = document.getElementById("unitId").value.trim();
   if (!id) return alert("Enter Unit ID first");
 
@@ -915,6 +996,7 @@ function publishFix(data) {
 
   lastValidFixTime = Date.now();
   lastFix = data;
+  publishPresence();
 
   unitsRef.child(currentUnitId).set(data);
   updateMap(currentUnitId, data);
@@ -927,13 +1009,29 @@ function publishFix(data) {
     `Unit: ${currentUnitId}\n` +
     `Lat: ${data.lat.toFixed(6)}\n` +
     `Lon: ${data.lon.toFixed(6)}\n` +
-    `Speed: ${Math.round((data.speed || 0) * 2.237)} mph\n` +
+    `Movement: ${getMovementLabel(data)}\n` +
     `Heading: ${data.heading || 0}\n` +
     `Accuracy est: ${data.acc} m\n` +
     `GPS: ${formatGpsSource(data.gpsSource)}\n` +
     (data.satellites ? `Satellites: ${data.satellites}\n` : "") +
     `Updated: ${age}`
   );
+}
+
+
+function getCardinalDirection(heading) {
+  const h = Number(heading);
+  if (Number.isNaN(h)) return "unknown direction";
+
+  const directions = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+  return directions[Math.round((((h % 360) + 360) % 360) / 45) % 8];
+}
+
+function getMovementLabel(data) {
+  const speedMph = (Number(data.speed) || 0) * 2.237;
+
+  if (speedMph < 2) return "Stationary";
+  return `Moving ${getCardinalDirection(data.heading)}`;
 }
 
 //////////////////////////////////////////////////////
@@ -971,7 +1069,7 @@ function getPoliceCarIcon(data) {
 }
 
 function updateMap(id, data) {
-  const speedMph = Math.round((data.speed || 0) * 2.237);
+  const movementLabel = getMovementLabel(data);
   const updated = data.gpsTime
     ? new Date(data.gpsTime).toLocaleTimeString()
     : "Unknown";
@@ -981,7 +1079,7 @@ function updateMap(id, data) {
     Health: ${getUnitHealthLabel(data)}<br>
     Source: ${formatGpsSource(data.gpsSource)}<br>
     ${data.satellites ? `Satellites: ${data.satellites}<br>` : ""}
-    Speed: ${speedMph} mph<br>
+    Movement: ${movementLabel}<br>
     Heading: ${Math.round(data.heading || 0)}°<br>
     Updated: ${updated}
   `;
@@ -998,10 +1096,24 @@ function updateMap(id, data) {
     });
 
     markers[id].bindPopup(popupHtml);
+    markers[id]._lastHeading = Math.round(getHeadingDegrees(data));
+    markers[id]._lastGpsSource = data.gpsSource;
 
   } else {
     markers[id].setLatLng([data.lat, data.lon]);
-    markers[id].setIcon(icon);
+
+    // Only rebuild the icon when the source or heading meaningfully changes.
+    // Rebuilding the emoji marker every single GPS tick can make the map appear to flicker/glitch.
+    const newHeading = Math.round(getHeadingDegrees(data));
+    const oldHeading = markers[id]._lastHeading;
+    const oldSource = markers[id]._lastGpsSource;
+
+    if (oldSource !== data.gpsSource || oldHeading === undefined || Math.abs(newHeading - oldHeading) >= 5) {
+      markers[id].setIcon(icon);
+      markers[id]._lastHeading = newHeading;
+      markers[id]._lastGpsSource = data.gpsSource;
+    }
+
     markers[id].setPopupContent(popupHtml);
   }
 
@@ -1034,7 +1146,7 @@ function centerOnUnit() {
 
 function isUnitOffline(data) {
   const last = data.gpsTime || data.time || 0;
-  return last ? (Date.now() - last) > 30000 : true;
+  return last ? (Date.now() - last) > UNIT_OFFLINE_MS : true;
 }
 
 function getUnitHealthLabel(data) {
@@ -1065,13 +1177,28 @@ function formatLastUpdateAge(timestamp) {
 // LIVE UNIT LIST / OTHER UNITS ON MAP
 //////////////////////////////////////////////////////
 
-unitsRef.on("value", (snap) => {
-  const data = snap.val() || {};
+function scheduleRenderUnitList() {
+  if (renderUnitListTimer) return;
+
+  renderUnitListTimer = setTimeout(() => {
+    renderUnitListTimer = null;
+    renderUnitList();
+  }, 750);
+}
+
+function isSessionActive(session) {
+  const last = session && session.lastSeen ? session.lastSeen : 0;
+  return last ? (Date.now() - last) <= SESSION_STALE_MS : false;
+}
+
+function renderUnitList() {
+  const data = latestUnits || {};
+  const sessions = latestSessions || {};
   const list = document.getElementById("unitList");
 
   if (list) list.innerHTML = "";
 
-  // Remove markers for units that no longer exist in Firebase
+  // Remove markers for units that no longer have GPS data in Firebase.
   Object.keys(markers).forEach((id) => {
     if (!data[id]) {
       map.removeLayer(markers[id]);
@@ -1079,58 +1206,85 @@ unitsRef.on("value", (snap) => {
     }
   });
 
+  // Keep map markers limited to units with actual coordinates.
   Object.keys(data).forEach((id) => {
     const u = data[id];
     if (!u || typeof u.lat !== "number" || typeof u.lon !== "number") return;
-
     updateMap(id, u);
+  });
 
-    if (!list) return;
+  if (!list) return;
 
-    const last = u.gpsTime || u.time || 0;
-    const offline = isUnitOffline(u);
-    const speedMph = Math.round((u.speed || 0) * 2.237);
-    const updated = last ? new Date(last).toLocaleTimeString() : "Unknown";
-    const updateAge = formatLastUpdateAge(last);
-    const sourceLabel = formatGpsSource(u.gpsSource);
-    const satLine = u.satellites ? `<br>Satellites: ${u.satellites}` : "";
+  const allIds = new Set([...Object.keys(sessions), ...Object.keys(data)]);
+
+  [...allIds].sort((a, b) => a.localeCompare(b, undefined, { numeric: true })).forEach((id) => {
+    const u = data[id];
+    const s = sessions[id];
+    const hasGps = !!(u && typeof u.lat === "number" && typeof u.lon === "number");
+    const gpsOffline = hasGps ? isUnitOffline(u) : true;
+    const loggedIn = isSessionActive(s);
+    const mode = s && s.mode === "dispatch" ? "Dispatch" : "Unit";
+    const gpsActive = hasGps && !gpsOffline;
+    const last = hasGps ? (u.gpsTime || u.time || 0) : 0;
+    const updateAge = hasGps ? formatLastUpdateAge(last) : "No GPS data yet";
+    const sourceLabel = hasGps ? formatGpsSource(u.gpsSource) : "No GPS feed";
+    const satLine = hasGps && u.satellites ? `<br>Satellites: ${u.satellites}` : "";
+    const movementLabel = hasGps ? getMovementLabel(u) : "Not displaying";
+
+    let statusLine = "Logged out / stale session";
+    if (loggedIn && gpsActive) statusLine = "LOGGED IN · GPS ACTIVE";
+    else if (loggedIn && !gpsActive) statusLine = "LOGGED IN · NO CURRENT GPS";
+    else if (!loggedIn && gpsActive) statusLine = "GPS ACTIVE · LOGIN UNKNOWN";
 
     const div = document.createElement("div");
-    div.className = "unit" + (offline ? " offline" : "");
+    div.className = "unit" + (gpsActive ? " gps-active" : loggedIn ? " logged-in-only" : " offline");
     div.innerHTML = `
-      <b>Unit ${id}</b><br>
-      <strong>${offline ? "OFFLINE" : "ONLINE"}</strong><br>
+      <b>${mode} ${id}</b><br>
+      <strong>${statusLine}</strong><br>
       GPS: ${sourceLabel}<br>
-      Last update: ${updateAge}${satLine}<br>
-      Speed: ${speedMph} mph
+      Last GPS: ${updateAge}${satLine}<br>
+      Movement: ${movementLabel}
     `;
 
     div.onclick = () => {
-      map.setView([u.lat, u.lon], 17);
-      if (markers[id]) markers[id].openPopup();
+      if (hasGps && markers[id]) {
+        map.setView([u.lat, u.lon], 17);
+        markers[id].openPopup();
+      }
+
       setFixDetails(
-        `Unit: ${id}\n` +
-        `Health: ${offline ? "OFFLINE" : "ONLINE"}\n` +
-        `GPS: ${sourceLabel}\n` +
-        (u.satellites ? `Satellites: ${u.satellites}\n` : "") +
-        `Lat: ${u.lat.toFixed(6)}\n` +
-        `Lon: ${u.lon.toFixed(6)}\n` +
-        `Speed: ${speedMph} mph\n` +
-        `Heading: ${Math.round(u.heading || 0)}°\n` +
-        `Last update: ${updateAge}\n` +
-        `Updated: ${updated}`
+        `${mode}: ${id}\n` +
+        `Login: ${loggedIn ? "Logged in" : "Not currently logged in / stale"}\n` +
+        `GPS: ${gpsActive ? "Active" : hasGps ? "Stale" : "No current GPS data"}\n` +
+        `Source: ${sourceLabel}\n` +
+        (hasGps && u.satellites ? `Satellites: ${u.satellites}\n` : "") +
+        (hasGps ? `Lat: ${u.lat.toFixed(6)}\n` : "") +
+        (hasGps ? `Lon: ${u.lon.toFixed(6)}\n` : "") +
+        `Movement: ${movementLabel}\n` +
+        (hasGps ? `Heading: ${Math.round(u.heading || 0)}°\n` : "") +
+        `Last GPS: ${updateAge}`
       );
     };
 
     list.appendChild(div);
   });
+}
+
+unitsRef.on("value", (snap) => {
+  latestUnits = snap.val() || {};
+  scheduleRenderUnitList();
 });
 
+sessionsRef.on("value", (snap) => {
+  latestSessions = snap.val() || {};
+  scheduleRenderUnitList();
+});
 //////////////////////////////////////////////////////
 // BROWSER GPS FALLBACK
 //////////////////////////////////////////////////////
 
 function startBrowserGPS() {
+  if (userMode === "dispatch") return alert("Dispatch view is view-only. GPS controls are disabled.");
   const id = document.getElementById("unitId").value.trim();
   if (!id) return alert("Enter Unit ID first");
 
@@ -1181,7 +1335,7 @@ async function logOffUnit() {
   }
 
   await disconnectSerialGPS();
-
+  await sessionsRef.child(id).remove().catch(() => {});
   await unitsRef.child(id).remove();
 
   if (markers[id]) {
@@ -1208,6 +1362,7 @@ async function forceRemoveUnit() {
     await disconnectSerialGPS();
   }
 
+  await sessionsRef.child(id).remove().catch(() => {});
   await unitsRef.child(id).remove();
 
   if (markers[id]) {
