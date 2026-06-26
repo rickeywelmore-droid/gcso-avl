@@ -106,27 +106,53 @@
       border: none;
     }
 
-    .police-car-wrap {
-      width: 34px;
-      height: 34px;
+    .unit-marker-wrap {
+      width: 48px;
+      height: 42px;
       display: flex;
+      flex-direction: column;
       align-items: center;
       justify-content: center;
-      font-size: 28px;
-      transform-origin: center center;
-      filter: drop-shadow(0 1px 2px rgba(0,0,0,0.65));
+      pointer-events: auto;
     }
 
-    .police-car-badge {
-      width: 42px;
-      height: 42px;
-      border-radius: 50%;
+    .unit-marker-label {
+      font-size: 11px;
+      font-weight: 800;
+      line-height: 12px;
+      color: white;
+      text-shadow:
+        -1px -1px 1px #000,
+         1px -1px 1px #000,
+        -1px  1px 1px #000,
+         1px  1px 1px #000;
+      margin-bottom: -2px;
+    }
+
+    .police-car-wrap {
+      width: 26px;
+      height: 26px;
       display: flex;
       align-items: center;
       justify-content: center;
-      border: 3px solid lime;
-      background: rgba(0,0,0,0.55);
-      box-sizing: border-box;
+      font-size: 22px;
+      transform-origin: center center;
+      filter: drop-shadow(0 1px 2px rgba(0,0,0,0.7));
+    }
+
+    .police-car-wrap.gps-lost {
+      opacity: 0.55;
+      filter: grayscale(1) drop-shadow(0 1px 2px rgba(0,0,0,0.7));
+    }
+
+    .section-title {
+      margin-top: 10px;
+      padding: 6px 4px;
+      font-size: 12px;
+      font-weight: bold;
+      color: #bbb;
+      border-bottom: 1px solid #333;
+      letter-spacing: 0.5px;
     }
 
     body.dark {
@@ -1083,21 +1109,23 @@ function getHeadingDegrees(data) {
   return heading;
 }
 
-function getPoliceCarIcon(data) {
-  const color = markerColor(data.gpsSource);
+function getPoliceCarIcon(id, data) {
   const heading = getHeadingDegrees(data);
+  const gpsLost = isUnitOffline(data);
+  const safeId = String(id || "").replace(/[<>&"']/g, "");
 
   return L.divIcon({
     className: "police-car-marker",
     html: `
-      <div class="police-car-badge" style="border-color:${color}">
-        <div class="police-car-wrap" style="transform: rotate(${heading}deg);">🚓</div>
+      <div class="unit-marker-wrap">
+        <div class="unit-marker-label">${safeId}</div>
+        <div class="police-car-wrap ${gpsLost ? "gps-lost" : ""}" style="transform: rotate(${heading}deg);">🚓</div>
       </div>
     `,
-    iconSize: [42, 42],
-    iconAnchor: [21, 21],
-    popupAnchor: [0, -22],
-    tooltipAnchor: [0, -22]
+    iconSize: [48, 42],
+    iconAnchor: [24, 28],
+    popupAnchor: [0, -30],
+    tooltipAnchor: [0, -30]
   });
 }
 
@@ -1117,16 +1145,12 @@ function updateMap(id, data) {
     Updated: ${updated}
   `;
 
-  const icon = getPoliceCarIcon(data);
+  const icon = getPoliceCarIcon(id, data);
 
   if (!markers[id]) {
     markers[id] = L.marker([data.lat, data.lon], {
       icon: icon
     }).addTo(map);
-
-    markers[id].bindTooltip(`Unit ${id}`, {
-      direction: "top"
-    });
 
     markers[id].bindPopup(popupHtml);
     markers[id]._lastHeading = Math.round(getHeadingDegrees(data));
@@ -1301,8 +1325,46 @@ function renderUnitList() {
   if (!list) return;
 
   const entries = buildListEntries(data, sessions);
+  const groups = {
+    active: [],
+    noGps: [],
+    dispatch: [],
+    offline: []
+  };
 
   entries.forEach((entry) => {
+    const u = entry.unitData;
+    const s = entry.session;
+    const mode = entry.mode;
+    const hasGps = !!(u && typeof u.lat === "number" && typeof u.lon === "number");
+    const gpsActive = hasGps && !isUnitOffline(u);
+    const loggedIn = isSessionActive(s);
+
+    if (mode === "Dispatch") groups.dispatch.push(entry);
+    else if (loggedIn && gpsActive) groups.active.push(entry);
+    else if (loggedIn && !gpsActive) groups.noGps.push(entry);
+    else groups.offline.push(entry);
+  });
+
+  function addSection(title, items) {
+    const header = document.createElement("div");
+    header.className = "section-title";
+    header.textContent = `${title} (${items.length})`;
+    list.appendChild(header);
+
+    if (!items.length) {
+      const empty = document.createElement("div");
+      empty.className = "unit";
+      empty.style.opacity = "0.55";
+      empty.innerHTML = "None";
+      list.appendChild(empty);
+      return;
+    }
+
+    items.forEach(addEntryToList);
+  }
+
+  function addEntryToList(entry) {
     const id = entry.id;
     const u = entry.unitData;
     const s = entry.session;
@@ -1319,8 +1381,10 @@ function renderUnitList() {
 
     let statusLine = "Logged out / stale session";
     if (mode === "Dispatch" && loggedIn) statusLine = "LOGGED IN · DISPATCH VIEW";
+    else if (mode === "Dispatch" && !loggedIn) statusLine = "DISPATCH SESSION STALE";
     else if (loggedIn && gpsActive) statusLine = "LOGGED IN · GPS ACTIVE";
-    else if (loggedIn && !gpsActive) statusLine = "LOGGED IN · NO CURRENT GPS";
+    else if (loggedIn && hasGps && gpsOffline) statusLine = "LOGGED IN · GPS LOST";
+    else if (loggedIn && !hasGps) statusLine = "LOGGED IN · NO GPS YET";
     else if (!loggedIn && gpsActive) statusLine = "GPS ACTIVE · LOGIN UNKNOWN";
 
     const div = document.createElement("div");
@@ -1342,7 +1406,7 @@ function renderUnitList() {
       setFixDetails(
         `${mode}: ${id}\n` +
         `Login: ${loggedIn ? "Logged in" : "Not currently logged in / stale"}\n` +
-        `GPS: ${mode === "Dispatch" ? "View only" : gpsActive ? "Active" : hasGps ? "Stale" : "No current GPS data"}\n` +
+        `GPS: ${mode === "Dispatch" ? "View only" : gpsActive ? "Active" : hasGps ? "Lost / stale" : "No GPS yet"}\n` +
         `Source: ${sourceLabel}\n` +
         (hasGps && u.satellites ? `Satellites: ${u.satellites}\n` : "") +
         (hasGps ? `Lat: ${u.lat.toFixed(6)}\n` : "") +
@@ -1354,7 +1418,12 @@ function renderUnitList() {
     };
 
     list.appendChild(div);
-  });
+  }
+
+  addSection("ACTIVE UNITS", groups.active);
+  addSection("NO GPS / GPS LOST", groups.noGps);
+  addSection("DISPATCH", groups.dispatch);
+  addSection("OFFLINE / STALE LOGIN", groups.offline);
 }
 
 unitsRef.on("value", (snap) => {
