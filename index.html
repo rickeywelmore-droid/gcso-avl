@@ -709,7 +709,7 @@ async function connectSerialGPS(isRetry = false) {
       `GPS Source: External USB GPS\n` +
       `Device: ${currentSerialLabel}\n` +
       `Baud: ${currentSerialBaud}\n` +
-      `Fix: waiting for valid RMC/GGA...`
+      `Fix: waiting for valid RMC or GGA...`
     );
 
     readSerialLoop();
@@ -939,12 +939,34 @@ function isChecksumValid(sentence) {
 // RMC PARSER
 //////////////////////////////////////////////////////
 
+function hasRecentUsableSerialFix(maxAgeMs = 10000) {
+  return !!(
+    lastFix &&
+    lastFix.gpsTime &&
+    (Date.now() - lastFix.gpsTime) <= maxAgeMs &&
+    lastFix.gpsSource &&
+    lastFix.gpsSource.startsWith("serial") &&
+    isValidLatLon(lastFix.lat, lastFix.lon)
+  );
+}
+
+function showGpsAcquiringStatus(reason) {
+  if (hasRecentUsableSerialFix()) {
+    // Some inexpensive receivers send a good GGA position and then a bad/void RMC sentence.
+    // Do not let that one bad sentence make AVL look offline or broken.
+    setStatus(`External GPS valid fix (${formatGpsSource(data.gpsSource)}): ${currentSerialLabel}`, "good");
+    return;
+  }
+
+  setStatus(reason || "External GPS connected. Waiting for position fix...", "warn");
+}
+
 function parseRMC(sentence) {
   const parts = sentence.split(",");
 
   const fixStatus = parts[2]; // A = valid, V = void
   if (fixStatus !== "A") {
-    setStatus("RMC received but fix is not valid", "warn");
+    showGpsAcquiringStatus("External GPS connected. Waiting for valid RMC/GGA position fix...");
     return;
   }
 
@@ -952,7 +974,7 @@ function parseRMC(sentence) {
   const lon = nmeaToDecimal(parts[5], parts[6], false);
 
   if (!isValidLatLon(lat, lon)) {
-    setStatus("Invalid RMC coordinates ignored", "warn");
+    showGpsAcquiringStatus("External GPS connected. RMC position not usable yet...");
     return;
   }
 
@@ -979,9 +1001,9 @@ function parseRMC(sentence) {
 function parseGGA(sentence) {
   const parts = sentence.split(",");
 
-  const fixQuality = parseInt(parts[6], 10); // 0 invalid, 1 GPS, 2 DGPS, etc.
+  const fixQuality = parseInt(parts[6], 10); // 0 invalid, 1 GPS, 2 DGPS, 4 RTK, etc.
   if (!fixQuality || fixQuality === 0) {
-    setStatus("GGA received but no valid fix", "warn");
+    showGpsAcquiringStatus("External GPS connected. Waiting for valid RMC/GGA position fix...");
     return;
   }
 
@@ -989,7 +1011,7 @@ function parseGGA(sentence) {
   const lon = nmeaToDecimal(parts[4], parts[5], false);
 
   if (!isValidLatLon(lat, lon)) {
-    setStatus("Invalid GGA coordinates ignored", "warn");
+    showGpsAcquiringStatus("External GPS connected. GGA position not usable yet...");
     return;
   }
 
@@ -1062,7 +1084,7 @@ function publishFix(data) {
 
   const age = new Date(data.gpsTime).toLocaleTimeString();
 
-  setStatus(`External GPS valid fix: ${currentSerialLabel}`, "good");
+  setStatus(`External GPS valid fix (${formatGpsSource(data.gpsSource)}): ${currentSerialLabel}`, "good");
 
   setFixDetails(
     `Unit: ${currentUnitId}\n` +
