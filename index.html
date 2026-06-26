@@ -182,9 +182,9 @@
 <div id="loginScreen">
   <h2>Gallatin County Sheriff's Office AVL</h2>
 
-  <input id="loginUnitId" placeholder="Unit ID" />
+  <input id="loginUnitId" placeholder="Unit ID / Dispatch Name" />
 
-  <select id="loginMode">
+  <select id="loginMode" onchange="updateLoginPlaceholder()">
     <option value="unit">Unit</option>
     <option value="dispatch">Dispatch</option>
   </select>
@@ -297,6 +297,7 @@ applyDarkMode();
 
 let markers = {};
 let currentUnitId = null;
+let currentSessionKey = null;
 let userMode = "unit";
 let browserWatchId = null;
 let presenceTimer = null;
@@ -315,6 +316,14 @@ let latestUnitsSnapshot = {};
 // LOGIN / SESSION
 //////////////////////////////////////////////////////
 
+
+
+function updateLoginPlaceholder() {
+  const loginInput = document.getElementById("loginUnitId");
+  const loginMode = document.getElementById("loginMode");
+  if (!loginInput || !loginMode) return;
+  loginInput.placeholder = loginMode.value === "dispatch" ? "Dispatcher Name" : "Unit ID";
+}
 
 function applyModeUi() {
   const gpsControls = document.getElementById("unitGpsControls");
@@ -340,10 +349,26 @@ function startPresenceHeartbeat() {
   presenceTimer = setInterval(publishPresence, 30000);
 }
 
+function sanitizeFirebaseKey(value) {
+  return String(value || "")
+    .trim()
+    .replace(/[.#$\[\]\/]/g, "_")
+    .replace(/\s+/g, "_") || "unknown";
+}
+
+function getSessionKey(mode, id) {
+  const prefix = mode === "dispatch" ? "dispatch" : "unit";
+  return `${prefix}_${sanitizeFirebaseKey(id)}`;
+}
+
 function publishPresence() {
   if (!currentUnitId) return;
 
-  sessionsRef.child(currentUnitId).set({
+  currentSessionKey = currentSessionKey || getSessionKey(userMode, currentUnitId);
+
+  sessionsRef.child(currentSessionKey).set({
+    id: currentUnitId,
+    displayName: currentUnitId,
     mode: userMode || "unit",
     loggedIn: true,
     lastSeen: Date.now(),
@@ -357,9 +382,13 @@ async function stopPresence(remove = true) {
     presenceTimer = null;
   }
 
-  if (remove && currentUnitId) {
-    await sessionsRef.child(currentUnitId).remove().catch(() => {});
+  const keyToRemove = currentSessionKey || (currentUnitId ? getSessionKey(userMode, currentUnitId) : null);
+
+  if (remove && keyToRemove) {
+    await sessionsRef.child(keyToRemove).remove().catch(() => {});
   }
+
+  currentSessionKey = null;
 }
 
 function restoreLogin() {  const savedId = localStorage.getItem("avl_unitId");
@@ -369,6 +398,7 @@ function restoreLogin() {  const savedId = localStorage.getItem("avl_unitId");
 
   currentUnitId = savedId;
   userMode = savedMode || "unit";
+  currentSessionKey = getSessionKey(userMode, currentUnitId);
 
   document.getElementById("unitId").value = savedId;
   document.getElementById("loginScreen").style.display = "none";
@@ -381,12 +411,13 @@ function restoreLogin() {  const savedId = localStorage.getItem("avl_unitId");
 function login() {
   const enteredId = document.getElementById("loginUnitId").value.trim();
   const mode = document.getElementById("loginMode").value;
-  const id = enteredId || (mode === "dispatch" ? "Dispatch" : "");
+  const id = enteredId;
 
-  if (!id) return alert("Enter Unit ID");
+  if (!id) return alert(mode === "dispatch" ? "Enter dispatcher name" : "Enter Unit ID");
 
   currentUnitId = id;
   userMode = mode;
+  currentSessionKey = getSessionKey(userMode, currentUnitId);
 
   localStorage.setItem("avl_unitId", id);
   localStorage.setItem("avl_mode", mode);
@@ -418,6 +449,7 @@ async function logout() {
   }
 
   currentUnitId = null;
+  currentSessionKey = null;
   userMode = null;
 
   localStorage.removeItem("avl_unitId");
@@ -430,6 +462,7 @@ async function logout() {
   setStatus("Logged out", "warn");
 }
 
+updateLoginPlaceholder();
 restoreLogin();
 //////////////////////////////////////////////////////
 // WAKE LOCK / BACKGROUND SAFEGUARDS
@@ -1191,6 +1224,58 @@ function isSessionActive(session) {
   return last ? (Date.now() - last) <= SESSION_STALE_MS : false;
 }
 
+function getSessionDisplayId(key, session) {
+  if (session && (session.displayName || session.id)) return session.displayName || session.id;
+  return String(key || "")
+    .replace(/^dispatch_/, "")
+    .replace(/^unit_/, "")
+    .replace(/_/g, " ");
+}
+
+function findUnitSession(unitId, sessions) {
+  if (sessions[unitId]) return sessions[unitId]; // backwards compatibility with earlier build
+  const directKey = getSessionKey("unit", unitId);
+  if (sessions[directKey]) return sessions[directKey];
+
+  return Object.keys(sessions)
+    .map((key) => sessions[key])
+    .find((session) => session && session.mode !== "dispatch" && getSessionDisplayId("", session) === unitId) || null;
+}
+
+function buildListEntries(data, sessions) {
+  const entries = [];
+  const addedUnitIds = new Set();
+
+  Object.keys(data).forEach((id) => {
+    const session = findUnitSession(id, sessions) || null;
+    entries.push({ id, key: `unit:${id}`, mode: "Unit", unitData: data[id], session });
+    addedUnitIds.add(id);
+  });
+
+  Object.keys(sessions).forEach((key) => {
+    const session = sessions[key];
+    if (!session) return;
+
+    const displayId = getSessionDisplayId(key, session);
+    const mode = session.mode === "dispatch" ? "Dispatch" : "Unit";
+
+    if (mode === "Unit" && addedUnitIds.has(displayId)) return;
+
+    entries.push({
+      id: displayId,
+      key: `${mode.toLowerCase()}:${key}`,
+      mode,
+      unitData: mode === "Unit" ? data[displayId] : null,
+      session
+    });
+  });
+
+  return entries.sort((a, b) => {
+    if (a.mode !== b.mode) return a.mode === "Unit" ? -1 : 1;
+    return a.id.localeCompare(b.id, undefined, { numeric: true });
+  });
+}
+
 function renderUnitList() {
   const data = latestUnits || {};
   const sessions = latestSessions || {};
@@ -1215,24 +1300,26 @@ function renderUnitList() {
 
   if (!list) return;
 
-  const allIds = new Set([...Object.keys(sessions), ...Object.keys(data)]);
+  const entries = buildListEntries(data, sessions);
 
-  [...allIds].sort((a, b) => a.localeCompare(b, undefined, { numeric: true })).forEach((id) => {
-    const u = data[id];
-    const s = sessions[id];
+  entries.forEach((entry) => {
+    const id = entry.id;
+    const u = entry.unitData;
+    const s = entry.session;
+    const mode = entry.mode;
     const hasGps = !!(u && typeof u.lat === "number" && typeof u.lon === "number");
     const gpsOffline = hasGps ? isUnitOffline(u) : true;
     const loggedIn = isSessionActive(s);
-    const mode = s && s.mode === "dispatch" ? "Dispatch" : "Unit";
     const gpsActive = hasGps && !gpsOffline;
     const last = hasGps ? (u.gpsTime || u.time || 0) : 0;
     const updateAge = hasGps ? formatLastUpdateAge(last) : "No GPS data yet";
-    const sourceLabel = hasGps ? formatGpsSource(u.gpsSource) : "No GPS feed";
+    const sourceLabel = hasGps ? formatGpsSource(u.gpsSource) : (mode === "Dispatch" ? "View only" : "No GPS feed");
     const satLine = hasGps && u.satellites ? `<br>Satellites: ${u.satellites}` : "";
-    const movementLabel = hasGps ? getMovementLabel(u) : "Not displaying";
+    const movementLabel = hasGps ? getMovementLabel(u) : (mode === "Dispatch" ? "View only" : "Not displaying");
 
     let statusLine = "Logged out / stale session";
-    if (loggedIn && gpsActive) statusLine = "LOGGED IN · GPS ACTIVE";
+    if (mode === "Dispatch" && loggedIn) statusLine = "LOGGED IN · DISPATCH VIEW";
+    else if (loggedIn && gpsActive) statusLine = "LOGGED IN · GPS ACTIVE";
     else if (loggedIn && !gpsActive) statusLine = "LOGGED IN · NO CURRENT GPS";
     else if (!loggedIn && gpsActive) statusLine = "GPS ACTIVE · LOGIN UNKNOWN";
 
@@ -1255,7 +1342,7 @@ function renderUnitList() {
       setFixDetails(
         `${mode}: ${id}\n` +
         `Login: ${loggedIn ? "Logged in" : "Not currently logged in / stale"}\n` +
-        `GPS: ${gpsActive ? "Active" : hasGps ? "Stale" : "No current GPS data"}\n` +
+        `GPS: ${mode === "Dispatch" ? "View only" : gpsActive ? "Active" : hasGps ? "Stale" : "No current GPS data"}\n` +
         `Source: ${sourceLabel}\n` +
         (hasGps && u.satellites ? `Satellites: ${u.satellites}\n` : "") +
         (hasGps ? `Lat: ${u.lat.toFixed(6)}\n` : "") +
