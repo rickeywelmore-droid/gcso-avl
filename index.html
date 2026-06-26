@@ -321,6 +321,22 @@ function toggleDarkMode() {
 
 applyDarkMode();
 
+function restoreSavedBaudRate() {
+  const baudSelect = document.getElementById("baudRate");
+  if (!baudSelect) return;
+
+  const savedBaud = localStorage.getItem("avl_lastBaudRate");
+  if (savedBaud && Array.from(baudSelect.options).some(opt => opt.value === savedBaud)) {
+    baudSelect.value = savedBaud;
+  }
+
+  baudSelect.addEventListener("change", () => {
+    localStorage.setItem("avl_lastBaudRate", baudSelect.value);
+  });
+}
+
+restoreSavedBaudRate();
+
 let markers = {};
 let currentUnitId = null;
 let currentSessionKey = null;
@@ -387,10 +403,28 @@ function getSessionKey(mode, id) {
   return `${prefix}_${sanitizeFirebaseKey(id)}`;
 }
 
+function configureDisconnectCleanup() {
+  if (!currentUnitId) return;
+
+  currentSessionKey = currentSessionKey || getSessionKey(userMode, currentUnitId);
+
+  // IMPORTANT:
+  // Do NOT use Firebase onDisconnect().remove() here.
+  // In rural/low-cell areas, Firebase can disconnect even though the AVL page,
+  // laptop, and GPS receiver are still running locally. If we delete on network
+  // loss, dispatch loses the unit from the map during ordinary coverage drops.
+  //
+  // Instead:
+  // - Normal browser/tab close calls removeCurrentSessionNow().
+  // - Log Off removes the unit immediately.
+  // - Internet loss keeps the last GPS point visible and heartbeat becomes stale.
+}
+
 function publishPresence() {
   if (!currentUnitId) return;
 
   currentSessionKey = currentSessionKey || getSessionKey(userMode, currentUnitId);
+  configureDisconnectCleanup();
 
   sessionsRef.child(currentSessionKey).set({
     id: currentUnitId,
@@ -400,6 +434,17 @@ function publishPresence() {
     lastSeen: Date.now(),
     loginTime: firebase.database.ServerValue.TIMESTAMP
   });
+}
+
+function removeCurrentSessionNow() {
+  if (!currentUnitId) return;
+
+  const keyToRemove = currentSessionKey || getSessionKey(userMode, currentUnitId);
+  sessionsRef.child(keyToRemove).remove().catch(() => {});
+
+  if (userMode !== "dispatch") {
+    unitsRef.child(currentUnitId).remove().catch(() => {});
+  }
 }
 
 async function stopPresence(remove = true) {
@@ -522,10 +567,12 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 
-window.addEventListener("beforeunload", (e) => {
-  e.preventDefault();
-  e.returnValue =
-    "Tracking will stop if Gallatin County Sheriff's Office AVL is closed.";
+window.addEventListener("pagehide", () => {
+  removeCurrentSessionNow();
+});
+
+window.addEventListener("beforeunload", () => {
+  removeCurrentSessionNow();
 });
 
 //////////////////////////////////////////////////////
@@ -593,6 +640,7 @@ function getSerialPortSignature(port) {
 
 function getBaudCandidates() {
   const selected = parseInt(document.getElementById("baudRate").value, 10) || 9600;
+  localStorage.setItem("avl_lastBaudRate", String(selected));
   return [selected, ...SERIAL_BAUD_RATES].filter((v, i, arr) => arr.indexOf(v) === i);
 }
 
@@ -694,6 +742,9 @@ async function connectSerialGPS(isRetry = false) {
     currentSerialBaud = found.baudRate;
     currentSerialLabel = getSerialPortLabel(serialPort);
     localStorage.setItem("avl_lastGpsSignature", getSerialPortSignature(serialPort));
+    localStorage.setItem("avl_lastBaudRate", String(currentSerialBaud));
+    const baudSelect = document.getElementById("baudRate");
+    if (baudSelect) baudSelect.value = String(currentSerialBaud);
 
     await serialPort.open({
       baudRate: currentSerialBaud,
@@ -1294,13 +1345,15 @@ function buildListEntries(data, sessions) {
 
   Object.keys(data).forEach((id) => {
     const session = findUnitSession(id, sessions) || null;
+    // If the browser is no longer checking in, do not show the unit at all.
+    if (!isSessionActive(session)) return;
     entries.push({ id, key: `unit:${id}`, mode: "Unit", unitData: data[id], session });
     addedUnitIds.add(id);
   });
 
   Object.keys(sessions).forEach((key) => {
     const session = sessions[key];
-    if (!session) return;
+    if (!session || !isSessionActive(session)) return;
 
     const displayId = getSessionDisplayId(key, session);
     const mode = session.mode === "dispatch" ? "Dispatch" : "Unit";
@@ -1329,17 +1382,20 @@ function renderUnitList() {
 
   if (list) list.innerHTML = "";
 
-  // Remove markers for units that no longer have GPS data in Firebase.
+  // Remove markers for units that no longer have GPS data or an active browser session.
   Object.keys(markers).forEach((id) => {
-    if (!data[id]) {
+    const session = findUnitSession(id, sessions);
+    if (!data[id] || !isSessionActive(session)) {
       map.removeLayer(markers[id]);
       delete markers[id];
     }
   });
 
-  // Keep map markers limited to units with actual coordinates.
+  // Keep map markers limited to logged-in units with actual coordinates.
   Object.keys(data).forEach((id) => {
     const u = data[id];
+    const session = findUnitSession(id, sessions);
+    if (!isSessionActive(session)) return;
     if (!u || typeof u.lat !== "number" || typeof u.lon !== "number") return;
     updateMap(id, u);
   });
@@ -1445,7 +1501,6 @@ function renderUnitList() {
   addSection("ACTIVE UNITS", groups.active);
   addSection("NO GPS / GPS LOST", groups.noGps);
   addSection("DISPATCH", groups.dispatch);
-  addSection("OFFLINE / STALE LOGIN", groups.offline);
 }
 
 unitsRef.on("value", (snap) => {
@@ -1513,7 +1568,7 @@ async function logOffUnit() {
   }
 
   await disconnectSerialGPS();
-  await sessionsRef.child(id).remove().catch(() => {});
+  await stopPresence(true);
   await unitsRef.child(id).remove();
 
   if (markers[id]) {
@@ -1540,7 +1595,8 @@ async function forceRemoveUnit() {
     await disconnectSerialGPS();
   }
 
-  await sessionsRef.child(id).remove().catch(() => {});
+  await sessionsRef.child(getSessionKey("unit", id)).remove().catch(() => {});
+  await sessionsRef.child(getSessionKey("dispatch", id)).remove().catch(() => {});
   await unitsRef.child(id).remove();
 
   if (markers[id]) {
