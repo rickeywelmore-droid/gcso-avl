@@ -368,6 +368,26 @@ function updateLoginPlaceholder() {
   loginInput.placeholder = loginMode.value === "dispatch" ? "Dispatcher Name" : "Unit ID";
 }
 
+function setupLoginInputHelpers() {
+  const loginInput = document.getElementById("loginUnitId");
+  const sidebarInput = document.getElementById("unitId");
+
+  if (loginInput && sidebarInput) {
+    loginInput.addEventListener("input", () => {
+      sidebarInput.value = loginInput.value;
+    });
+
+    loginInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        login();
+      }
+    });
+  }
+}
+
+setupLoginInputHelpers();
+
 function applyModeUi() {
   const gpsControls = document.getElementById("unitGpsControls");
   const unitIdInput = document.getElementById("unitId");
@@ -482,10 +502,23 @@ function restoreLogin() {  const savedId = localStorage.getItem("avl_unitId");
   setStatus(`Session restored for ${savedId}`, "good");
 }
 
+function getTypedLoginId() {
+  const loginInput = document.getElementById("loginUnitId");
+  const sidebarInput = document.getElementById("unitId");
+
+  const loginValue = loginInput ? loginInput.value.trim() : "";
+  const sidebarValue = sidebarInput ? sidebarInput.value.trim() : "";
+
+  // Primary source is the login screen box. Sidebar fallback prevents a false
+  // "Enter Unit ID" if a browser autofill or older cached page put the value
+  // into the main Unit ID box instead.
+  return loginValue || sidebarValue;
+}
+
 function login() {
-  const enteredId = document.getElementById("loginUnitId").value.trim();
-  const mode = document.getElementById("loginMode").value;
-  const id = enteredId;
+  const modeEl = document.getElementById("loginMode");
+  const mode = modeEl ? modeEl.value : "unit";
+  const id = getTypedLoginId();
 
   if (!id) return alert(mode === "dispatch" ? "Enter dispatcher name" : "Enter Unit ID");
 
