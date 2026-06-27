@@ -117,8 +117,8 @@
     }
 
     .unit-marker-wrap {
-      width: 48px;
-      height: 42px;
+      width: 52px;
+      height: 48px;
       display: flex;
       flex-direction: column;
       align-items: center;
@@ -136,23 +136,40 @@
          1px -1px 1px #000,
         -1px  1px 1px #000,
          1px  1px 1px #000;
-      margin-bottom: -2px;
+      margin-bottom: -1px;
     }
 
     .police-car-wrap {
-      width: 24px;
-      height: 24px;
+      position: relative;
+      width: 34px;
+      height: 30px;
       display: flex;
       align-items: center;
       justify-content: center;
-      transform-origin: center center;
       filter: drop-shadow(0 1px 2px rgba(0,0,0,0.7));
     }
 
-    .patrol-car-svg {
-      width: 24px;
-      height: 24px;
-      display: block;
+    .direction-arrow {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 0;
+      height: 0;
+      border-left: 5px solid transparent;
+      border-right: 5px solid transparent;
+      border-bottom: 10px solid #00ff66;
+      transform-origin: 50% 18px;
+      margin-left: -5px;
+      margin-top: -20px;
+      filter: drop-shadow(0 1px 1px #000);
+      opacity: 0.95;
+    }
+
+    .police-car-emoji {
+      font-size: 25px;
+      line-height: 25px;
+      transform: none;
+      text-shadow: 0 1px 2px #000;
     }
 
     .police-car-wrap.gps-lost {
@@ -1242,31 +1259,23 @@ function getPoliceCarIcon(id, data) {
   const gpsLost = isUnitOffline(data);
   const safeId = String(id || "").replace(/[<>&"']/g, "");
 
-  // Use a simple top-down vehicle SVG instead of the emoji.
-  // The emoji looks upside down when rotated southbound; this top-down icon is meant to rotate 360°.
-  const carSvg = `
-    <svg class="patrol-car-svg" viewBox="0 0 32 32" aria-hidden="true">
-      <path d="M16 2 L22 10 L22 25 Q22 29 18 29 L14 29 Q10 29 10 25 L10 10 Z" fill="#f7f7f7" stroke="#111" stroke-width="2"/>
-      <path d="M13 9 L19 9 L21 14 L11 14 Z" fill="#7fc8ff" stroke="#111" stroke-width="1"/>
-      <rect x="11" y="16" width="10" height="8" rx="2" fill="#222" opacity="0.85"/>
-      <rect x="14" y="4" width="4" height="3" rx="1" fill="#d71920"/>
-      <circle cx="11" cy="24" r="1.4" fill="#111"/>
-      <circle cx="21" cy="24" r="1.4" fill="#111"/>
-    </svg>
-  `;
-
+  // Keep the police car visually recognizable and upright.
+  // The small arrow rotates to show direction of travel, so the car no longer turns into a boat/pencil.
   return L.divIcon({
     className: "police-car-marker",
     html: `
       <div class="unit-marker-wrap">
         <div class="unit-marker-label">${safeId}</div>
-        <div class="police-car-wrap ${gpsLost ? "gps-lost" : ""}" style="transform: rotate(${heading}deg);">${carSvg}</div>
+        <div class="police-car-wrap ${gpsLost ? "gps-lost" : ""}">
+          <div class="direction-arrow" style="transform: rotate(${heading}deg);"></div>
+          <div class="police-car-emoji">🚓</div>
+        </div>
       </div>
     `,
-    iconSize: [48, 42],
-    iconAnchor: [24, 28],
-    popupAnchor: [0, -30],
-    tooltipAnchor: [0, -30]
+    iconSize: [52, 48],
+    iconAnchor: [26, 32],
+    popupAnchor: [0, -34],
+    tooltipAnchor: [0, -34]
   });
 }
 
