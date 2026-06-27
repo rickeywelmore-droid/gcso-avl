@@ -140,14 +140,19 @@
     }
 
     .police-car-wrap {
-      width: 26px;
-      height: 26px;
+      width: 24px;
+      height: 24px;
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 22px;
       transform-origin: center center;
       filter: drop-shadow(0 1px 2px rgba(0,0,0,0.7));
+    }
+
+    .patrol-car-svg {
+      width: 24px;
+      height: 24px;
+      display: block;
     }
 
     .police-car-wrap.gps-lost {
@@ -1237,12 +1242,25 @@ function getPoliceCarIcon(id, data) {
   const gpsLost = isUnitOffline(data);
   const safeId = String(id || "").replace(/[<>&"']/g, "");
 
+  // Use a simple top-down vehicle SVG instead of the emoji.
+  // The emoji looks upside down when rotated southbound; this top-down icon is meant to rotate 360°.
+  const carSvg = `
+    <svg class="patrol-car-svg" viewBox="0 0 32 32" aria-hidden="true">
+      <path d="M16 2 L22 10 L22 25 Q22 29 18 29 L14 29 Q10 29 10 25 L10 10 Z" fill="#f7f7f7" stroke="#111" stroke-width="2"/>
+      <path d="M13 9 L19 9 L21 14 L11 14 Z" fill="#7fc8ff" stroke="#111" stroke-width="1"/>
+      <rect x="11" y="16" width="10" height="8" rx="2" fill="#222" opacity="0.85"/>
+      <rect x="14" y="4" width="4" height="3" rx="1" fill="#d71920"/>
+      <circle cx="11" cy="24" r="1.4" fill="#111"/>
+      <circle cx="21" cy="24" r="1.4" fill="#111"/>
+    </svg>
+  `;
+
   return L.divIcon({
     className: "police-car-marker",
     html: `
       <div class="unit-marker-wrap">
         <div class="unit-marker-label">${safeId}</div>
-        <div class="police-car-wrap ${gpsLost ? "gps-lost" : ""}" style="transform: rotate(${heading}deg);">🚓</div>
+        <div class="police-car-wrap ${gpsLost ? "gps-lost" : ""}" style="transform: rotate(${heading}deg);">${carSvg}</div>
       </div>
     `,
     iconSize: [48, 42],
@@ -1288,7 +1306,11 @@ function updateMap(id, data) {
     const oldHeading = markers[id]._lastHeading;
     const oldSource = markers[id]._lastGpsSource;
 
-    if (oldSource !== data.gpsSource || oldHeading === undefined || Math.abs(newHeading - oldHeading) >= 5) {
+    const headingDelta = oldHeading === undefined
+      ? 999
+      : Math.abs((((newHeading - oldHeading) + 540) % 360) - 180);
+
+    if (oldSource !== data.gpsSource || headingDelta >= 5) {
       markers[id].setIcon(icon);
       markers[id]._lastHeading = newHeading;
       markers[id]._lastGpsSource = data.gpsSource;
