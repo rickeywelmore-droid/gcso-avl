@@ -1360,6 +1360,14 @@ function isSessionActive(session) {
   return last ? (Date.now() - last) <= SESSION_STALE_MS : false;
 }
 
+function isEffectivelyConnected(session, unitData) {
+  // If a unit has sent a recent GPS fix, the browser is obviously still talking
+  // to Firebase even if the separate heartbeat record is missing/stale.
+  // This prevents a good GPS feed from being labeled "not connected."
+  if (isSessionActive(session)) return true;
+  return !!(unitData && typeof unitData.lat === "number" && typeof unitData.lon === "number" && !isUnitOffline(unitData));
+}
+
 function getSessionDisplayId(key, session) {
   if (session && (session.displayName || session.id)) return session.displayName || session.id;
   return String(key || "")
@@ -1457,10 +1465,11 @@ function renderUnitList() {
     const hasGps = !!(u && typeof u.lat === "number" && typeof u.lon === "number");
     const gpsActive = hasGps && !isUnitOffline(u);
     const loggedIn = isSessionActive(s);
+    const connected = isEffectivelyConnected(s, u);
 
     if (mode === "Dispatch") groups.dispatch.push(entry);
-    else if (loggedIn && gpsActive) groups.active.push(entry);
-    else if (loggedIn && !gpsActive) groups.noGps.push(entry);
+    else if (gpsActive) groups.active.push(entry);
+    else if (connected && !gpsActive) groups.noGps.push(entry);
     else groups.offline.push(entry);
   });
 
@@ -1491,6 +1500,7 @@ function renderUnitList() {
     const gpsOffline = hasGps ? isUnitOffline(u) : true;
     const loggedIn = isSessionActive(s);
     const gpsActive = hasGps && !gpsOffline;
+    const connected = isEffectivelyConnected(s, u);
     const last = hasGps ? (u.gpsTime || u.time || 0) : 0;
     const updateAge = hasGps ? formatLastUpdateAge(last) : "No GPS data yet";
     const sourceLabel = hasGps ? formatGpsSource(u.gpsSource) : (mode === "Dispatch" ? "View only" : "No GPS feed");
@@ -1500,14 +1510,13 @@ function renderUnitList() {
     let statusLine = "Logged out / stale session";
     if (mode === "Dispatch" && loggedIn) statusLine = "LOGGED IN · DISPATCH VIEW";
     else if (mode === "Dispatch" && !loggedIn) statusLine = "DISPATCH SESSION STALE";
-    else if (loggedIn && gpsActive) statusLine = "LOGGED IN · GPS ACTIVE";
-    else if (loggedIn && hasGps && gpsOffline) statusLine = "LOGGED IN · GPS LOST";
-    else if (loggedIn && !hasGps) statusLine = "LOGGED IN · NO GPS YET";
-    else if (!loggedIn && gpsActive) statusLine = "CONNECTION LOST · LAST GPS STILL RECENT";
-    else if (!loggedIn && hasGps) statusLine = "CONNECTION LOST · LAST KNOWN POSITION";
+    else if (gpsActive) statusLine = loggedIn ? "LOGGED IN · GPS ACTIVE" : "GPS ACTIVE · HEARTBEAT CATCHING UP";
+    else if (connected && hasGps && gpsOffline) statusLine = "LOGGED IN · GPS LOST";
+    else if (connected && !hasGps) statusLine = "LOGGED IN · NO GPS YET";
+    else if (!connected && hasGps) statusLine = "CONNECTION LOST · LAST KNOWN POSITION";
 
     const div = document.createElement("div");
-    div.className = "unit" + (gpsActive ? " gps-active" : loggedIn ? " logged-in-only" : " offline");
+    div.className = "unit" + (gpsActive ? " gps-active" : connected ? " logged-in-only" : " offline");
     div.innerHTML = `
       <b>${mode} ${id}</b><br>
       <strong>${statusLine}</strong><br>
@@ -1582,6 +1591,7 @@ function startBrowserGPS() {
       gpsTime: Date.now()
     };
 
+    publishPresence();
     unitsRef.child(id).set(data);
     updateMap(id, data);
 
