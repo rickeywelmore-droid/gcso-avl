@@ -187,6 +187,114 @@
       letter-spacing: 0.5px;
     }
 
+    .cad-roster-title {
+      margin: 8px 0 10px;
+      padding: 8px 10px;
+      background: linear-gradient(180deg, #202020, #111);
+      border: 1px solid #333;
+      border-radius: 4px;
+      text-align: center;
+      font-weight: 800;
+      letter-spacing: 1px;
+      color: #f3f3f3;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.06);
+    }
+
+    .cad-section-title {
+      margin-top: 10px;
+      padding: 7px 8px;
+      background: #090909;
+      border-top: 1px solid #333;
+      border-bottom: 1px solid #333;
+      color: #ddd;
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.8px;
+      text-transform: uppercase;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .cad-count {
+      color: #999;
+      font-weight: 700;
+    }
+
+    .cad-empty {
+      padding: 8px 10px;
+      color: #777;
+      font-size: 12px;
+      border-left: 4px solid #333;
+      background: #161616;
+      margin: 4px 0;
+    }
+
+    .cad-row {
+      display: grid;
+      grid-template-columns: 58px 1fr auto;
+      gap: 7px;
+      align-items: center;
+      padding: 7px 8px;
+      margin: 4px 0;
+      background: #1a1a1a;
+      border-left: 4px solid #333;
+      border-radius: 3px;
+      cursor: pointer;
+      font-size: 12px;
+    }
+
+    .cad-row:hover {
+      background: #242424;
+    }
+
+    .cad-row.active { border-left-color: lime; }
+    .cad-row.gps-issue { border-left-color: #ff3b3b; }
+    .cad-row.connection-lost { border-left-color: #888; opacity: 0.92; }
+    .cad-row.dispatch { border-left-color: deepskyblue; }
+
+    .cad-unit-id {
+      font-weight: 900;
+      font-size: 14px;
+      color: #fff;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .cad-main {
+      min-width: 0;
+      color: #eee;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .cad-sub {
+      margin-top: 2px;
+      color: #aaa;
+      font-size: 11px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .cad-badge {
+      font-size: 11px;
+      font-weight: 800;
+      padding: 3px 6px;
+      border-radius: 999px;
+      background: #333;
+      color: #ddd;
+      white-space: nowrap;
+    }
+
+    .cad-badge.active { background: #104d20; color: #b8ffc8; }
+    .cad-badge.issue { background: #5a1717; color: #ffd0d0; }
+    .cad-badge.lost { background: #333; color: #ddd; }
+    .cad-badge.dispatch { background: #123d55; color: #c8efff; }
+
+
     body.dark {
       background: #050505;
       color: #e6e6e6;
@@ -1464,6 +1572,89 @@ function buildListEntries(data, sessions) {
   });
 }
 
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function getRosterState(entry) {
+  const u = entry.unitData;
+  const s = entry.session;
+  const mode = entry.mode;
+  const hasGps = !!(u && typeof u.lat === "number" && typeof u.lon === "number");
+  const gpsActive = hasGps && !isUnitOffline(u);
+  const connected = isEffectivelyConnected(s, u);
+  const loggedIn = isSessionActive(s);
+
+  if (mode === "Dispatch") {
+    return {
+      group: "dispatch",
+      rowClass: "dispatch",
+      badgeClass: "dispatch",
+      badge: loggedIn ? "ONLINE" : "STALE",
+      main: loggedIn ? "Dispatch view" : "Dispatch session stale",
+      sub: loggedIn ? "Logged in" : "No recent heartbeat"
+    };
+  }
+
+  if (gpsActive) {
+    return {
+      group: "active",
+      rowClass: "active",
+      badgeClass: "active",
+      badge: "ACTIVE",
+      main: getMovementLabel(u),
+      sub: `${formatGpsSource(u.gpsSource)} · Last GPS ${formatLastUpdateAge(u.gpsTime || u.time || 0)}`
+    };
+  }
+
+  if (connected && hasGps) {
+    return {
+      group: "gpsIssues",
+      rowClass: "gps-issue",
+      badgeClass: "issue",
+      badge: "GPS LOST",
+      main: "GPS stale",
+      sub: `Last GPS ${formatLastUpdateAge(u.gpsTime || u.time || 0)} · ${formatGpsSource(u.gpsSource)}`
+    };
+  }
+
+  if (connected && !hasGps) {
+    return {
+      group: "gpsIssues",
+      rowClass: "gps-issue",
+      badgeClass: "issue",
+      badge: "NO GPS",
+      main: "Acquiring / no GPS feed yet",
+      sub: "Browser is connected"
+    };
+  }
+
+  if (hasGps) {
+    return {
+      group: "connectionLost",
+      rowClass: "connection-lost",
+      badgeClass: "lost",
+      badge: "LAST FIX",
+      main: "Connection lost",
+      sub: `Last known GPS ${formatLastUpdateAge(u.gpsTime || u.time || 0)}`
+    };
+  }
+
+  return {
+    group: "connectionLost",
+    rowClass: "connection-lost",
+    badgeClass: "lost",
+    badge: "OFFLINE",
+    main: "No active connection",
+    sub: "No GPS point available"
+  };
+}
+
 function renderUnitList() {
   const data = latestUnits || {};
   const sessions = latestSessions || {};
@@ -1482,8 +1673,6 @@ function renderUnitList() {
   });
 
   // Keep map markers for any unit that still has coordinates.
-  // If the browser truly closed, pagehide/logoff should remove the GPS record.
-  // If the unit only lost internet, the last known point remains visible.
   Object.keys(data).forEach((id) => {
     const u = data[id];
     if (!u || typeof u.lat !== "number" || typeof u.lon !== "number") return;
@@ -1492,40 +1681,35 @@ function renderUnitList() {
 
   if (!list) return;
 
+  const title = document.createElement("div");
+  title.className = "cad-roster-title";
+  title.textContent = "GCSO AVL ROSTER";
+  list.appendChild(title);
+
   const entries = buildListEntries(data, sessions);
   const groups = {
     active: [],
-    noGps: [],
-    dispatch: [],
-    offline: []
+    gpsIssues: [],
+    connectionLost: [],
+    dispatch: []
   };
 
   entries.forEach((entry) => {
-    const u = entry.unitData;
-    const s = entry.session;
-    const mode = entry.mode;
-    const hasGps = !!(u && typeof u.lat === "number" && typeof u.lon === "number");
-    const gpsActive = hasGps && !isUnitOffline(u);
-    const loggedIn = isSessionActive(s);
-    const connected = isEffectivelyConnected(s, u);
-
-    if (mode === "Dispatch") groups.dispatch.push(entry);
-    else if (gpsActive) groups.active.push(entry);
-    else if (connected && !gpsActive) groups.noGps.push(entry);
-    else groups.offline.push(entry);
+    const state = getRosterState(entry);
+    entry._rosterState = state;
+    groups[state.group].push(entry);
   });
 
-  function addSection(title, items) {
+  function addSection(titleText, items) {
     const header = document.createElement("div");
-    header.className = "section-title";
-    header.textContent = `${title} (${items.length})`;
+    header.className = "cad-section-title";
+    header.innerHTML = `<span>${escapeHtml(titleText)}</span><span class="cad-count">${items.length}</span>`;
     list.appendChild(header);
 
     if (!items.length) {
       const empty = document.createElement("div");
-      empty.className = "unit";
-      empty.style.opacity = "0.55";
-      empty.innerHTML = "None";
+      empty.className = "cad-empty";
+      empty.textContent = "None";
       list.appendChild(empty);
       return;
     }
@@ -1538,33 +1722,24 @@ function renderUnitList() {
     const u = entry.unitData;
     const s = entry.session;
     const mode = entry.mode;
+    const state = entry._rosterState || getRosterState(entry);
     const hasGps = !!(u && typeof u.lat === "number" && typeof u.lon === "number");
-    const gpsOffline = hasGps ? isUnitOffline(u) : true;
+    const gpsActive = hasGps && !isUnitOffline(u);
     const loggedIn = isSessionActive(s);
-    const gpsActive = hasGps && !gpsOffline;
-    const connected = isEffectivelyConnected(s, u);
     const last = hasGps ? (u.gpsTime || u.time || 0) : 0;
     const updateAge = hasGps ? formatLastUpdateAge(last) : "No GPS data yet";
     const sourceLabel = hasGps ? formatGpsSource(u.gpsSource) : (mode === "Dispatch" ? "View only" : "No GPS feed");
-    const satLine = hasGps && u.satellites ? `<br>Satellites: ${u.satellites}` : "";
     const movementLabel = hasGps ? getMovementLabel(u) : (mode === "Dispatch" ? "View only" : "Not displaying");
 
-    let statusLine = "Logged out / stale session";
-    if (mode === "Dispatch" && loggedIn) statusLine = "LOGGED IN · DISPATCH VIEW";
-    else if (mode === "Dispatch" && !loggedIn) statusLine = "DISPATCH SESSION STALE";
-    else if (gpsActive) statusLine = loggedIn ? "LOGGED IN · GPS ACTIVE" : "GPS ACTIVE · HEARTBEAT CATCHING UP";
-    else if (connected && hasGps && gpsOffline) statusLine = "LOGGED IN · GPS LOST";
-    else if (connected && !hasGps) statusLine = "LOGGED IN · NO GPS YET";
-    else if (!connected && hasGps) statusLine = "CONNECTION LOST · LAST KNOWN POSITION";
-
     const div = document.createElement("div");
-    div.className = "unit" + (gpsActive ? " gps-active" : connected ? " logged-in-only" : " offline");
+    div.className = `cad-row ${state.rowClass}`;
     div.innerHTML = `
-      <b>${mode} ${id}</b><br>
-      <strong>${statusLine}</strong><br>
-      GPS: ${sourceLabel}<br>
-      Last GPS: ${updateAge}${satLine}<br>
-      Movement: ${movementLabel}
+      <div class="cad-unit-id">${escapeHtml(mode === "Dispatch" ? id : id)}</div>
+      <div class="cad-main">
+        ${escapeHtml(state.main)}
+        <div class="cad-sub">${escapeHtml(state.sub)}</div>
+      </div>
+      <div class="cad-badge ${state.badgeClass}">${escapeHtml(state.badge)}</div>
     `;
 
     div.onclick = () => {
@@ -1575,7 +1750,7 @@ function renderUnitList() {
 
       setFixDetails(
         `${mode}: ${id}\n` +
-        `Connection: ${loggedIn ? "Online" : "Connection lost / heartbeat stale"}\n` +
+        `Connection: ${loggedIn || gpsActive ? "Online / recently updating" : "Connection lost / heartbeat stale"}\n` +
         `GPS: ${mode === "Dispatch" ? "View only" : gpsActive ? "Active" : hasGps ? "Lost / stale" : "No GPS yet"}\n` +
         `Source: ${sourceLabel}\n` +
         (hasGps && u.satellites ? `Satellites: ${u.satellites}\n` : "") +
@@ -1590,9 +1765,9 @@ function renderUnitList() {
     list.appendChild(div);
   }
 
-  addSection("ACTIVE UNITS", groups.active);
-  addSection("NO GPS / GPS LOST", groups.noGps);
-  addSection("CONNECTION LOST / LAST KNOWN", groups.offline);
+  addSection("ACTIVE", groups.active);
+  addSection("GPS ISSUES", groups.gpsIssues);
+  addSection("CONNECTION LOST / LAST KNOWN", groups.connectionLost);
   addSection("DISPATCH", groups.dispatch);
 }
 
