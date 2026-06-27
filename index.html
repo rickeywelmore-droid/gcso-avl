@@ -34,6 +34,16 @@
       flex: 1;
     }
 
+    /* Dark mode map contrast boost.
+       Uses standard OSM tiles with a CSS dark filter so road labels remain readable. */
+    body.dark .leaflet-container {
+      background: #111;
+    }
+
+    body.dark .leaflet-tile-pane img {
+      filter: invert(1) hue-rotate(180deg) brightness(0.95) contrast(1.35) saturate(0.75);
+    }
+
     input, button, select {
       width: 100%;
       padding: 8px;
@@ -292,9 +302,10 @@ let lightTiles = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png
   maxZoom: 19
 }).addTo(map);
 
-let darkTiles = L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
+let darkTiles = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
   maxZoom: 19,
-  attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
+  attribution: '&copy; OpenStreetMap contributors',
+  className: "dark-contrast-tiles"
 });
 
 let darkMode = localStorage.getItem("avl_darkMode") === "true";
