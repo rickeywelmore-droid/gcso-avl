@@ -215,7 +215,11 @@ function publishPresence() {
     mode: userMode || "unit",
     loggedIn: true,
     lastSeen: Date.now(),
+    serverLastSeen: firebase.database.ServerValue.TIMESTAMP,
     loginTime: sessionLoginTime || Date.now()
+  }).catch((err) => {
+    console.error("Presence write failed:", err);
+    setStatus("Presence update failed: " + err.message, "bad");
   });
 }
 
@@ -391,13 +395,11 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 
-window.addEventListener("pagehide", () => {
-  removeCurrentSessionNow();
-});
-
-window.addEventListener("beforeunload", () => {
-  removeCurrentSessionNow();
-});
+// Do not remove the Firebase session from pagehide/beforeunload.
+// Mobile browsers can fire pagehide when the tab or browser is merely
+// backgrounded, which made named dispatchers disappear from the roster.
+// Explicit Logout / Log Off handles immediate removal. Otherwise the
+// heartbeat naturally becomes stale if the page is truly closed.
 
 
 //////////////////////////////////////////////////////
@@ -1291,7 +1293,9 @@ function scheduleRenderUnitList() {
 }
 
 function isSessionActive(session) {
-  const last = session && session.lastSeen ? session.lastSeen : 0;
+  const last = session
+    ? (session.serverLastSeen || session.lastSeen || 0)
+    : 0;
   return last ? (Date.now() - last) <= SESSION_STALE_MS : false;
 }
 
