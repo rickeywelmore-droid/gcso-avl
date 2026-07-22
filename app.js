@@ -89,6 +89,9 @@ let sessionLoginTime = null;
 let userRole = "user";
 let selectedRosterUnitId = null;
 let selectedRosterMode = null;
+let ownDispatchSessionRef = null;
+let ownDispatchSessionEstablished = false;
+let adminBootInProgress = false;
 let firebaseConnected = false;
 let lastPendingFix = null;
 let lastPendingUnitId = null;
@@ -251,6 +254,75 @@ async function stopPresence(remove = true) {
   currentSessionKey = null;
 }
 
+function stopWatchingOwnDispatchSession() {
+  if (ownDispatchSessionRef) {
+    ownDispatchSessionRef.off();
+    ownDispatchSessionRef = null;
+  }
+
+  ownDispatchSessionEstablished = false;
+}
+
+function clearSavedLogin() {
+  clearSavedLogin();
+}
+
+function forceBackToLogin(message) {
+  if (adminBootInProgress) return;
+  adminBootInProgress = true;
+
+  if (presenceTimer) {
+    clearInterval(presenceTimer);
+    presenceTimer = null;
+  }
+
+  stopWatchingOwnDispatchSession();
+  clearSavedLogin();
+
+  currentUnitId = null;
+  currentSessionKey = null;
+  userMode = null;
+  userRole = "user";
+  selectedRosterUnitId = null;
+  selectedRosterMode = null;
+
+  const unitIdInput = document.getElementById("unitId");
+  const loginIdInput = document.getElementById("loginUnitId");
+  const loginScreen = document.getElementById("loginScreen");
+
+  if (unitIdInput) unitIdInput.value = "";
+  if (loginIdInput) loginIdInput.value = "";
+  if (loginScreen) loginScreen.style.display = "flex";
+
+  applyModeUi();
+  setStatus(message || "Disconnected by an administrator", "warn");
+  setFixDetails(message || "You were disconnected by an administrator.");
+
+  alert(message || "You were disconnected by an administrator.");
+  adminBootInProgress = false;
+}
+
+function watchOwnDispatchSession() {
+  stopWatchingOwnDispatchSession();
+
+  if (!currentSessionKey || userMode !== "dispatch") return;
+
+  ownDispatchSessionRef = sessionsRef.child(currentSessionKey);
+  ownDispatchSessionEstablished = false;
+
+  ownDispatchSessionRef.on("value", (snapshot) => {
+    if (snapshot.exists()) {
+      ownDispatchSessionEstablished = true;
+      return;
+    }
+
+    // Ignore the initial gap before the first presence write reaches Firebase.
+    if (!ownDispatchSessionEstablished || !currentUnitId || userMode !== "dispatch") return;
+
+    forceBackToLogin("You were disconnected by an administrator.");
+  });
+}
+
 function restoreLogin() {
   const savedId = localStorage.getItem("avl_unitId");
   const savedMode = localStorage.getItem("avl_mode");
@@ -259,8 +331,17 @@ function restoreLogin() {
 
   if (!savedId || savedAccess !== "granted") return;
 
+  const restoredMode = savedMode || "unit";
+  if (restoredMode === "dispatch" && !isValidDispatchName(savedId)) {
+    clearSavedLogin();
+    const loginScreen = document.getElementById("loginScreen");
+    if (loginScreen) loginScreen.style.display = "flex";
+    setStatus("Saved dispatcher name rejected. Please log in with a real name.", "warn");
+    return;
+  }
+
   currentUnitId = savedId;
-  userMode = savedMode || "unit";
+  userMode = restoredMode;
   userRole = savedRole === "admin" ? "admin" : "user";
   currentSessionKey = getSessionKey(userMode, currentUnitId);
   sessionLoginTime = parseInt(localStorage.getItem("avl_sessionLoginTime"), 10) || Date.now();
@@ -271,6 +352,7 @@ function restoreLogin() {
 
   applyModeUi();
   startPresenceHeartbeat();
+  watchOwnDispatchSession();
   setStatus(`Session restored for ${savedId}`, "good");
 }
 
@@ -341,10 +423,13 @@ function login() {
 
   applyModeUi();
   startPresenceHeartbeat();
+  watchOwnDispatchSession();
   setStatus(`Logged in as ${id} (${mode}${userRole === "admin" ? ", admin" : ""})`, "good");
 }
 
 async function logout() {
+  stopWatchingOwnDispatchSession();
+
   if (browserWatchId !== null) {
     navigator.geolocation.clearWatch(browserWatchId);
     browserWatchId = null;
