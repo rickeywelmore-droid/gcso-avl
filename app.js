@@ -18,7 +18,7 @@ const connectedRef = db.ref(".info/connected");
 // Temporary client-side access gate. This is a convenience barrier, not strong security.
 const USER_PASSWORD = "GCSO123";
 const ADMIN_PASSWORD = "GCSOADMIN123";
-const APP_VERSION = "1.0.0-split-reconnect";
+const APP_VERSION = "1.1.1-invalid-dispatch-block";
 
 //////////////////////////////////////////////////////
 // MAP
@@ -98,6 +98,10 @@ let lastPendingUnitId = null;
 let lastSuccessfulWriteTime = 0;
 let lastFirebaseConnectionChange = Date.now();
 let developerPanelVisible = false;
+let clientSessionId = localStorage.getItem("avl_clientSessionId") || createClientSessionId();
+let publicIpAddress = "Checking...";
+let localEventLog = [];
+localStorage.setItem("avl_clientSessionId", clientSessionId);
 
 const SESSION_STALE_MS = 2 * 60 * 1000; // logged-in heartbeat grace period
 
@@ -109,6 +113,111 @@ const UNIT_OFFLINE_MS = 15 * 60 * 1000; // 15 minutes
 const UNIT_EXPIRE_MS = 2 * 60 * 60 * 1000; // 2 hours
 let unitListRenderTimer = null;
 let latestUnitsSnapshot = {};
+
+//////////////////////////////////////////////////////
+// ADMIN DIAGNOSTICS
+//////////////////////////////////////////////////////
+
+function createClientSessionId() {
+  const cryptoPart = (window.crypto && crypto.getRandomValues)
+    ? Array.from(crypto.getRandomValues(new Uint8Array(4)))
+        .map((value) => value.toString(16).padStart(2, "0"))
+        .join("")
+    : Math.random().toString(16).slice(2, 10);
+
+  return cryptoPart.toUpperCase().match(/.{1,4}/g).join("-");
+}
+
+function getBrowserLabel() {
+  const ua = navigator.userAgent || "";
+  let match = ua.match(/Edg\/([\d.]+)/);
+  if (match) return `Edge ${match[1]}`;
+  match = ua.match(/Chrome\/([\d.]+)/);
+  if (match) return `Chrome ${match[1]}`;
+  match = ua.match(/Firefox\/([\d.]+)/);
+  if (match) return `Firefox ${match[1]}`;
+  match = ua.match(/Version\/([\d.]+).*Safari/);
+  if (match) return `Safari ${match[1]}`;
+  return "Unknown browser";
+}
+
+function getPlatformLabel() {
+  const ua = navigator.userAgent || "";
+  if (/Windows NT 10.0/.test(ua)) return "Windows 10/11";
+  if (/iPhone/.test(ua)) return "iPhone";
+  if (/iPad/.test(ua)) return "iPad";
+  if (/Android/.test(ua)) return "Android";
+  if (/Macintosh/.test(ua)) return "macOS";
+  return navigator.platform || "Unknown platform";
+}
+
+function addDiagnosticEvent(message) {
+  const stamp = new Date().toLocaleTimeString();
+  localEventLog.unshift(`${stamp}  ${message}`);
+  localEventLog = localEventLog.slice(0, 20);
+  updateDeveloperInfo();
+}
+
+async function loadPublicIpAddress() {
+  try {
+    const response = await fetch("https://api.ipify.org?format=json", { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const result = await response.json();
+    publicIpAddress = result.ip || "Unavailable";
+    addDiagnosticEvent("Public IP detected");
+    if (currentUnitId) publishPresence();
+  } catch (err) {
+    publicIpAddress = "Unavailable";
+    console.warn("Public IP lookup failed:", err);
+    addDiagnosticEvent("Public IP lookup unavailable");
+  }
+}
+
+function getSessionDiagnostics(session) {
+  if (!session) return "No live session diagnostics available.";
+
+  const lastSeen = session.serverLastSeen || session.lastSeen || 0;
+  const lastGps = session.lastGpsTime || 0;
+  const lastUpload = session.lastUploadTime || 0;
+
+  return [
+    `Session ID: ${session.sessionId || "Unknown"}`,
+    `Public IP: ${session.publicIp || "Unavailable"}`,
+    `Browser: ${session.browser || "Unknown"}`,
+    `Platform: ${session.platform || "Unknown"}`,
+    `Version: ${session.appVersion || "Unknown"}`,
+    `Browser network: ${session.networkOnline === false ? "OFFLINE" : "ONLINE"}`,
+    `Firebase: ${session.firebaseConnected === false ? "DISCONNECTED" : "CONNECTED"}`,
+    `GPS source: ${formatGpsSource(session.gpsSource)}`,
+    `Last GPS: ${lastGps ? formatLastUpdateAge(lastGps) : "No GPS fix"}`,
+    `Last upload: ${lastUpload ? formatLastUpdateAge(lastUpload) : "No confirmed upload"}`,
+    `Last heartbeat: ${lastSeen ? formatLastUpdateAge(lastSeen) : "Unknown"}`
+  ].join("\n");
+}
+
+function getSelectedRosterSession() {
+  if (!selectedRosterUnitId) return null;
+
+  if ((selectedRosterMode || "Unit") === "Dispatch") {
+    const direct = latestSessions[getSessionKey("dispatch", selectedRosterUnitId)];
+    if (direct) return direct;
+  } else {
+    const direct = latestSessions[getSessionKey("unit", selectedRosterUnitId)];
+    if (direct) return direct;
+  }
+
+  return Object.values(latestSessions || {}).find((session) =>
+    session &&
+    (session.displayName || session.id) === selectedRosterUnitId &&
+    ((selectedRosterMode === "Dispatch" && session.mode === "dispatch") ||
+     (selectedRosterMode !== "Dispatch" && session.mode !== "dispatch"))
+  ) || null;
+}
+
+window.addEventListener("load", () => {
+  addDiagnosticEvent("AVL application loaded");
+  loadPublicIpAddress();
+});
 
 //////////////////////////////////////////////////////
 // LOGIN / SESSION
@@ -211,6 +320,39 @@ function configureDisconnectCleanup() {
 function publishPresence() {
   if (!currentUnitId) return;
 
+  // Enforce dispatcher-name validation on every heartbeat, not only at login.
+  // This prevents an older saved/cached session such as "." from resurrecting itself.
+  if (userMode === "dispatch" && !isValidDispatchName(currentUnitId)) {
+    const invalidKey = currentSessionKey || getSessionKey("dispatch", currentUnitId);
+
+    if (presenceTimer) {
+      clearInterval(presenceTimer);
+      presenceTimer = null;
+    }
+
+    sessionsRef.child(invalidKey).remove().catch(() => {});
+    clearSavedLogin();
+
+    currentUnitId = null;
+    currentSessionKey = null;
+    userMode = null;
+    userRole = "user";
+
+    const unitIdInput = document.getElementById("unitId");
+    const loginIdInput = document.getElementById("loginUnitId");
+    const loginScreen = document.getElementById("loginScreen");
+
+    if (unitIdInput) unitIdInput.value = "";
+    if (loginIdInput) loginIdInput.value = "";
+    if (loginScreen) loginScreen.style.display = "flex";
+
+    applyModeUi();
+    setStatus("Invalid dispatcher name blocked. Please log in with a real name.", "warn");
+    setFixDetails("Invalid dispatcher name blocked.");
+    addDiagnosticEvent("Invalid dispatcher session blocked and cleared");
+    return;
+  }
+
   currentSessionKey = currentSessionKey || getSessionKey(userMode, currentUnitId);
   configureDisconnectCleanup();
 
@@ -221,7 +363,17 @@ function publishPresence() {
     loggedIn: true,
     lastSeen: Date.now(),
     serverLastSeen: firebase.database.ServerValue.TIMESTAMP,
-    loginTime: sessionLoginTime || Date.now()
+    loginTime: sessionLoginTime || Date.now(),
+    sessionId: clientSessionId,
+    publicIp: publicIpAddress,
+    browser: getBrowserLabel(),
+    platform: getPlatformLabel(),
+    appVersion: APP_VERSION,
+    networkOnline: navigator.onLine,
+    firebaseConnected: firebaseConnected,
+    gpsSource: lastFix?.gpsSource || "none",
+    lastGpsTime: lastFix?.gpsTime || 0,
+    lastUploadTime: lastSuccessfulWriteTime || 0
   }).catch((err) => {
     console.error("Presence write failed:", err);
     setStatus("Presence update failed: " + err.message, "bad");
@@ -264,7 +416,11 @@ function stopWatchingOwnDispatchSession() {
 }
 
 function clearSavedLogin() {
-  clearSavedLogin();
+  localStorage.removeItem("avl_unitId");
+  localStorage.removeItem("avl_mode");
+  localStorage.removeItem("avl_role");
+  localStorage.removeItem("avl_temp_access");
+  localStorage.removeItem("avl_sessionLoginTime");
 }
 
 function forceBackToLogin(message) {
@@ -354,6 +510,7 @@ function restoreLogin() {
   startPresenceHeartbeat();
   watchOwnDispatchSession();
   setStatus(`Session restored for ${savedId}`, "good");
+  addDiagnosticEvent(`Session restored: ${savedId} (${userMode})`);
 }
 
 function getTypedLoginId() {
@@ -425,6 +582,7 @@ function login() {
   startPresenceHeartbeat();
   watchOwnDispatchSession();
   setStatus(`Logged in as ${id} (${mode}${userRole === "admin" ? ", admin" : ""})`, "good");
+  addDiagnosticEvent(`Login: ${id} (${mode}${userRole === "admin" ? ", admin" : ""})`);
 }
 
 async function logout() {
@@ -465,6 +623,7 @@ async function logout() {
   applyModeUi();
 
   setStatus("Logged out", "warn");
+  addDiagnosticEvent("Logout completed");
 }
 
 updateLoginPlaceholder();
@@ -520,10 +679,12 @@ connectedRef.on("value", async (snap) => {
 
   if (firebaseConnected) {
     setNetworkStatus("ONLINE", "good");
+    addDiagnosticEvent("Firebase connected");
     if (currentUnitId) publishPresence();
     await flushPendingFix();
   } else {
     setNetworkStatus("FIREBASE DISCONNECTED — GPS WILL KEEP RUNNING", "warn");
+    addDiagnosticEvent("Firebase disconnected");
   }
 
   updateDeveloperInfo();
@@ -531,11 +692,13 @@ connectedRef.on("value", async (snap) => {
 
 window.addEventListener("offline", () => {
   setNetworkStatus("INTERNET LOST — SAVING LATEST FIX", "warn");
+  addDiagnosticEvent("Browser network offline");
   updateDeveloperInfo();
 });
 
 window.addEventListener("online", async () => {
   setNetworkStatus("RECONNECTING...", "warn");
+  addDiagnosticEvent("Browser network restored");
   if (currentUnitId) publishPresence();
   await flushPendingFix();
   updateDeveloperInfo();
@@ -670,28 +833,37 @@ function updateDeveloperInfo() {
     ? formatLastUpdateAge(lastSuccessfulWriteTime)
     : "No confirmed write yet";
 
-  el.innerText =
-    `Version: ${APP_VERSION}
-` +
-    `Role: ${userRole}
-` +
-    `Mode: ${userMode || "not logged in"}
-` +
-    `Firebase: ${firebaseConnected ? "CONNECTED" : "DISCONNECTED"}
-` +
-    `Browser network: ${navigator.onLine ? "ONLINE" : "OFFLINE"}
-` +
-    `Last GPS: ${lastGps}
-` +
-    `Last Firebase write: ${lastWrite}
-` +
-    `Pending fix: ${lastPendingFix ? "YES" : "NO"}
-` +
-    `Serial: ${serialPort ? `CONNECTED @ ${currentSerialBaud || "?"}` : "DISCONNECTED"}
-` +
-    `Wake lock: ${wakeLock ? "ACTIVE" : "INACTIVE"}
-` +
-    `Selected unit: ${selectedRosterUnitId || "None"}`;
+  const selectedSession = getSelectedRosterSession();
+  const selectedTitle = selectedRosterUnitId
+    ? `${selectedRosterMode || "Unit"} ${selectedRosterUnitId}`
+    : "None";
+
+  const localDiagnostics = [
+    "THIS DEVICE",
+    `Version: ${APP_VERSION}`,
+    `User: ${currentUnitId || "Not logged in"}`,
+    `Role: ${userRole}`,
+    `Mode: ${userMode || "not logged in"}`,
+    `Session ID: ${clientSessionId}`,
+    `Public IP: ${publicIpAddress}`,
+    `Browser: ${getBrowserLabel()}`,
+    `Platform: ${getPlatformLabel()}`,
+    `Firebase: ${firebaseConnected ? "CONNECTED" : "DISCONNECTED"}`,
+    `Browser network: ${navigator.onLine ? "ONLINE" : "OFFLINE"}`,
+    `Last GPS: ${lastGps}`,
+    `Last Firebase write: ${lastWrite}`,
+    `Pending fix: ${lastPendingFix ? "YES" : "NO"}`,
+    `Serial: ${serialPort ? `CONNECTED @ ${currentSerialBaud || "?"}` : "DISCONNECTED"}`,
+    `Wake lock: ${wakeLock ? "ACTIVE" : "INACTIVE"}`,
+    "",
+    `SELECTED: ${selectedTitle}`,
+    getSessionDiagnostics(selectedSession),
+    "",
+    "LOCAL EVENT LOG (CLEARS ON REFRESH)",
+    ...(localEventLog.length ? localEventLog : ["No events yet"])
+  ];
+
+  el.innerText = localDiagnostics.join("\n");
 }
 
 function getSerialPortLabel(port) {
@@ -829,6 +1001,7 @@ async function connectSerialGPS(isRetry = false) {
 
     serialKeepReading = true;
     setStatus(`External GPS locked: ${currentSerialLabel} @ ${currentSerialBaud} baud`, "good");
+    addDiagnosticEvent(`External GPS connected @ ${currentSerialBaud} baud`);
     setFixDetails(
       `GPS Source: External USB GPS\n` +
       `Device: ${currentSerialLabel}\n` +
@@ -945,7 +1118,10 @@ async function disconnectSerialGPS(manual = true) {
       serialPort = null;
     }
 
-    if (manual) setStatus("External GPS disconnected", "warn");
+    if (manual) {
+      setStatus("External GPS disconnected", "warn");
+      addDiagnosticEvent("External GPS disconnected");
+    }
 
   } catch (err) {
     console.error(err);
@@ -1753,6 +1929,7 @@ function startBrowserGPS() {
     updateMap(id, data);
 
     setStatus("Browser GPS active", "good");
+    if (!lastFix || lastFix.gpsSource !== "browser") addDiagnosticEvent("Browser GPS fallback active");
 
   }, (err) => {
     setStatus("Browser GPS error: " + err.message, "bad");
