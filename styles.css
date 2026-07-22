@@ -361,3 +361,13 @@ html, body {
         height: 55vh;
       }
     }
+
+
+.app-version {
+  margin-top: 10px;
+  padding: 8px 4px;
+  color: #888;
+  font-size: 11px;
+  text-align: center;
+  border-top: 1px solid #2b2b2b;
+}

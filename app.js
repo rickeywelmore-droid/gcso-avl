@@ -15,10 +15,29 @@ const unitsRef = db.ref("units");
 const sessionsRef = db.ref("sessions");
 const connectedRef = db.ref(".info/connected");
 
-// Temporary client-side access gate. This is a convenience barrier, not strong security.
+/*********************************************************************
+ GCSO AVL CONFIGURATION
+ --------------------------------------------------------------------
+ Version: 1.1.3
+ Build: 2026-07-22
+
+ Temporary client-side access gate. This is a convenience barrier,
+ not strong authentication.
+*********************************************************************/
+const APP_VERSION = "1.1.3";
+const BUILD_DATE = "2026-07-22";
 const USER_PASSWORD = "GCSO123";
 const ADMIN_PASSWORD = "GCSOADMIN123";
-const APP_VERSION = "1.1.2-startup-order-fix";
+const PRESENCE_TIMEOUT_MINUTES = 2;
+const UNIT_OFFLINE_MINUTES = 15;
+const ABANDONED_UNIT_HOURS = 2;
+const HEARTBEAT_SECONDS = 30;
+const DEBUG = false;
+
+
+function debugLog(...args) {
+  if (DEBUG) console.log("[GCSO AVL]", ...args);
+}
 
 //////////////////////////////////////////////////////
 // MAP
@@ -122,10 +141,10 @@ const GPS_RESCAN_MS = 3000;
 
 localStorage.setItem("avl_clientSessionId", clientSessionId);
 
-const SESSION_STALE_MS = 2 * 60 * 1000; // logged-in heartbeat grace period
+const SESSION_STALE_MS = PRESENCE_TIMEOUT_MINUTES * 60 * 1000; // logged-in heartbeat grace period
 
 // A unit should only show OFFLINE after no GPS data has been received for this long.
-const UNIT_OFFLINE_MS = 15 * 60 * 1000; // 15 minutes
+const UNIT_OFFLINE_MS = UNIT_OFFLINE_MINUTES * 60 * 1000;
 // Remove abandoned unit records after two hours with no GPS and no active session.
 // This preserves last-known positions through ordinary rural coverage gaps without
 // leaving cars from prior shifts on the map indefinitely.
@@ -248,7 +267,7 @@ function updateLoginPlaceholder() {
   const loginInput = document.getElementById("loginUnitId");
   const loginMode = document.getElementById("loginMode");
   if (!loginInput || !loginMode) return;
-  loginInput.placeholder = loginMode.value === "dispatch" ? "Dispatcher Name" : "Unit ID";
+  loginInput.placeholder = loginMode.value === "dispatch" ? "Dispatcher Name" : "Unit Number";
 }
 
 function setupLoginInputHelpers() {
@@ -286,7 +305,7 @@ function applyModeUi() {
   const unitIdInput = document.getElementById("unitId");
 
   if (gpsControls) gpsControls.classList.toggle("mode-hidden", userMode === "dispatch");
-  if (unitIdInput) unitIdInput.placeholder = userMode === "dispatch" ? "Dispatch Name" : "Unit ID";
+  if (unitIdInput) unitIdInput.placeholder = userMode === "dispatch" ? "Dispatcher Name" : "Unit Number";
 
   document.querySelectorAll(".admin-only").forEach((el) => {
     const shouldShow = userRole === "admin" && (el.id !== "developerPanel" || developerPanelVisible);
@@ -307,7 +326,7 @@ function startPresenceHeartbeat() {
   }
 
   publishPresence();
-  presenceTimer = setInterval(publishPresence, 30000);
+  presenceTimer = setInterval(publishPresence, HEARTBEAT_SECONDS * 1000);
 }
 
 function sanitizeFirebaseKey(value) {
@@ -842,7 +861,7 @@ function updateDeveloperInfo() {
 
   const localDiagnostics = [
     "THIS DEVICE",
-    `Version: ${APP_VERSION}`,
+    `Version: ${APP_VERSION} (${BUILD_DATE})`,
     `User: ${currentUnitId || "Not logged in"}`,
     `Role: ${userRole}`,
     `Mode: ${userMode || "not logged in"}`,
