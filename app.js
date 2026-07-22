@@ -18,13 +18,13 @@ const connectedRef = db.ref(".info/connected");
 /*********************************************************************
  GCSO AVL CONFIGURATION
  --------------------------------------------------------------------
- Version: 1.1.3
+ Version: 1.1.4
  Build: 2026-07-22
 
  Temporary client-side access gate. This is a convenience barrier,
  not strong authentication.
 *********************************************************************/
-const APP_VERSION = "1.1.3";
+const APP_VERSION = "1.1.4";
 const BUILD_DATE = "2026-07-22";
 const USER_PASSWORD = "GCSO123";
 const ADMIN_PASSWORD = "GCSOADMIN123";
@@ -32,6 +32,9 @@ const PRESENCE_TIMEOUT_MINUTES = 2;
 const UNIT_OFFLINE_MINUTES = 15;
 const ABANDONED_UNIT_HOURS = 2;
 const HEARTBEAT_SECONDS = 30;
+const DISPATCH_IDLE_MINUTES = 60;
+const DISPATCH_WARNING_MINUTES = 5;
+const DISPATCH_SOUND_ENABLED = true;
 const DEBUG = false;
 
 
@@ -120,6 +123,12 @@ let developerPanelVisible = false;
 let clientSessionId = localStorage.getItem("avl_clientSessionId") || createClientSessionId();
 let publicIpAddress = "Checking...";
 let localEventLog = [];
+let dispatchLastActivityTime = Date.now();
+let dispatchIdleTimer = null;
+let dispatchCountdownTimer = null;
+let dispatchWarningVisible = false;
+let dispatchWarningOneMinutePlayed = false;
+let audioContext = null;
 
 // Runtime state used by restored sessions, diagnostics, wake lock, and serial GPS.
 // These must be initialized before restoreLogin() or any load/connection callbacks run.
@@ -151,6 +160,140 @@ const UNIT_OFFLINE_MS = UNIT_OFFLINE_MINUTES * 60 * 1000;
 const UNIT_EXPIRE_MS = 2 * 60 * 60 * 1000; // 2 hours
 let unitListRenderTimer = null;
 let latestUnitsSnapshot = {};
+
+
+//////////////////////////////////////////////////////
+// DISPATCH INACTIVITY TIMEOUT
+//////////////////////////////////////////////////////
+
+const DISPATCH_IDLE_MS = DISPATCH_IDLE_MINUTES * 60 * 1000;
+const DISPATCH_WARNING_MS = DISPATCH_WARNING_MINUTES * 60 * 1000;
+
+function playDispatchTone(kind = "warning") {
+  if (!DISPATCH_SOUND_ENABLED) return;
+
+  try {
+    audioContext = audioContext || new (window.AudioContext || window.webkitAudioContext)();
+    if (audioContext.state === "suspended") audioContext.resume();
+
+    const now = audioContext.currentTime;
+    const tones = kind === "logout"
+      ? [[520, 0], [390, 0.18]]
+      : [[740, 0], [920, 0.16]];
+
+    tones.forEach(([frequency, delay]) => {
+      const oscillator = audioContext.createOscillator();
+      const gain = audioContext.createGain();
+      oscillator.type = "sine";
+      oscillator.frequency.value = frequency;
+      gain.gain.setValueAtTime(0.0001, now + delay);
+      gain.gain.exponentialRampToValueAtTime(0.16, now + delay + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + delay + 0.13);
+      oscillator.connect(gain);
+      gain.connect(audioContext.destination);
+      oscillator.start(now + delay);
+      oscillator.stop(now + delay + 0.15);
+    });
+  } catch (err) {
+    debugLog("Dispatch tone unavailable", err);
+  }
+}
+
+function formatDispatchCountdown(milliseconds) {
+  const totalSeconds = Math.max(0, Math.ceil(milliseconds / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function hideDispatchIdleWarning() {
+  const modal = document.getElementById("dispatchIdleModal");
+  if (modal) modal.classList.add("mode-hidden");
+  dispatchWarningVisible = false;
+  dispatchWarningOneMinutePlayed = false;
+
+  if (dispatchCountdownTimer) {
+    clearInterval(dispatchCountdownTimer);
+    dispatchCountdownTimer = null;
+  }
+}
+
+function resetDispatchActivity() {
+  if (userMode !== "dispatch" || !currentUnitId || dispatchWarningVisible) return;
+  dispatchLastActivityTime = Date.now();
+}
+
+function stayLoggedInDispatch() {
+  if (userMode !== "dispatch") return;
+  dispatchLastActivityTime = Date.now();
+  hideDispatchIdleWarning();
+  publishPresence();
+  setStatus("Dispatcher session extended", "good");
+  addDiagnosticEvent("Dispatcher extended idle session");
+}
+
+function showDispatchIdleWarning() {
+  if (userMode !== "dispatch" || dispatchWarningVisible) return;
+
+  dispatchWarningVisible = true;
+  dispatchWarningOneMinutePlayed = false;
+  const modal = document.getElementById("dispatchIdleModal");
+  if (modal) modal.classList.remove("mode-hidden");
+  playDispatchTone("warning");
+  addDiagnosticEvent("Dispatcher idle timeout warning displayed");
+
+  const updateCountdown = async () => {
+    if (userMode !== "dispatch" || !currentUnitId) {
+      hideDispatchIdleWarning();
+      return;
+    }
+
+    const logoutAt = dispatchLastActivityTime + DISPATCH_IDLE_MS;
+    const remaining = logoutAt - Date.now();
+    const display = document.getElementById("dispatchIdleCountdown");
+    if (display) display.textContent = formatDispatchCountdown(remaining);
+
+    if (remaining <= 60000 && !dispatchWarningOneMinutePlayed) {
+      dispatchWarningOneMinutePlayed = true;
+      playDispatchTone("warning");
+    }
+
+    if (remaining <= 0) {
+      hideDispatchIdleWarning();
+      playDispatchTone("logout");
+      setStatus("Dispatcher session expired due to inactivity", "warn");
+      addDiagnosticEvent("Dispatcher automatically logged out after inactivity");
+      await logout();
+    }
+  };
+
+  updateCountdown();
+  dispatchCountdownTimer = setInterval(updateCountdown, 1000);
+}
+
+function startDispatchIdleMonitor() {
+  stopDispatchIdleMonitor();
+  if (userMode !== "dispatch" || !currentUnitId) return;
+
+  dispatchLastActivityTime = Date.now();
+  dispatchIdleTimer = setInterval(() => {
+    if (userMode !== "dispatch" || !currentUnitId) return;
+    const idleFor = Date.now() - dispatchLastActivityTime;
+    if (idleFor >= DISPATCH_IDLE_MS - DISPATCH_WARNING_MS) showDispatchIdleWarning();
+  }, 15000);
+}
+
+function stopDispatchIdleMonitor() {
+  if (dispatchIdleTimer) {
+    clearInterval(dispatchIdleTimer);
+    dispatchIdleTimer = null;
+  }
+  hideDispatchIdleWarning();
+}
+
+["pointerdown", "keydown", "wheel", "touchstart"].forEach((eventName) => {
+  window.addEventListener(eventName, resetDispatchActivity, { passive: true });
+});
 
 //////////////////////////////////////////////////////
 // ADMIN DIAGNOSTICS
@@ -547,6 +690,7 @@ function restoreLogin() {
   applyModeUi();
   startPresenceHeartbeat();
   watchOwnDispatchSession();
+  startDispatchIdleMonitor();
   setStatus(`Session restored for ${savedId}`, "good");
   addDiagnosticEvent(`Session restored: ${savedId} (${userMode})`);
 }
@@ -619,11 +763,13 @@ function login() {
   applyModeUi();
   startPresenceHeartbeat();
   watchOwnDispatchSession();
+  startDispatchIdleMonitor();
   setStatus(`Logged in as ${id} (${mode}${userRole === "admin" ? ", admin" : ""})`, "good");
   addDiagnosticEvent(`Login: ${id} (${mode}${userRole === "admin" ? ", admin" : ""})`);
 }
 
 async function logout() {
+  stopDispatchIdleMonitor();
   stopWatchingOwnDispatchSession();
 
   if (browserWatchId !== null) {

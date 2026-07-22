@@ -1,3 +1,13 @@
+# Changelog
+
+## 1.1.4 — 2026-07-22
+- Added dispatcher-only inactivity monitoring.
+- Added a five-minute timeout warning with a live countdown.
+- Added subtle two-tone warning and logout sounds using browser audio.
+- Added Stay Logged In and Logout Now controls.
+- Dispatcher sessions automatically log out after 60 minutes without interaction.
+- Unit sessions are not affected by dispatcher inactivity rules.
+
 # GCSO AVL Changelog
 
 ## 1.1.3 — 2026-07-22

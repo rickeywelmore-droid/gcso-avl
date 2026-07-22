@@ -371,3 +371,52 @@ html, body {
   text-align: center;
   border-top: 1px solid #2b2b2b;
 }
+
+
+.idle-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.72);
+}
+
+.idle-modal.mode-hidden { display: none; }
+
+.idle-modal-card {
+  width: min(420px, 100%);
+  padding: 24px;
+  border: 1px solid #4a4a4a;
+  border-radius: 8px;
+  background: #111;
+  color: #f2f2f2;
+  text-align: center;
+  box-shadow: 0 18px 55px rgba(0, 0, 0, 0.55);
+}
+
+.idle-modal-title {
+  margin-bottom: 12px;
+  font-size: 21px;
+  font-weight: 800;
+}
+
+.idle-countdown {
+  margin: 18px 0;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 42px;
+  font-weight: 800;
+  letter-spacing: 2px;
+}
+
+.idle-modal-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.idle-modal-actions button {
+  flex: 1;
+  min-height: 44px;
+}
