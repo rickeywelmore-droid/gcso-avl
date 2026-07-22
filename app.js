@@ -88,6 +88,7 @@ let renderUnitListTimer = null;
 let sessionLoginTime = null;
 let userRole = "user";
 let selectedRosterUnitId = null;
+let selectedRosterMode = null;
 let firebaseConnected = false;
 let lastPendingFix = null;
 let lastPendingUnitId = null;
@@ -99,6 +100,10 @@ const SESSION_STALE_MS = 2 * 60 * 1000; // logged-in heartbeat grace period
 
 // A unit should only show OFFLINE after no GPS data has been received for this long.
 const UNIT_OFFLINE_MS = 15 * 60 * 1000; // 15 minutes
+// Remove abandoned unit records after two hours with no GPS and no active session.
+// This preserves last-known positions through ordinary rural coverage gaps without
+// leaving cars from prior shifts on the map indefinitely.
+const UNIT_EXPIRE_MS = 2 * 60 * 60 * 1000; // 2 hours
 let unitListRenderTimer = null;
 let latestUnitsSnapshot = {};
 
@@ -191,16 +196,13 @@ function configureDisconnectCleanup() {
 
   currentSessionKey = currentSessionKey || getSessionKey(userMode, currentUnitId);
 
-  // IMPORTANT:
-  // Do NOT use Firebase onDisconnect().remove() here.
-  // In rural/low-cell areas, Firebase can disconnect even though the AVL page,
-  // laptop, and GPS receiver are still running locally. If we delete on network
-  // loss, dispatch loses the unit from the map during ordinary coverage drops.
-  //
-  // Instead:
-  // - Normal browser/tab close calls removeCurrentSessionNow().
-  // - Log Off removes the unit immediately.
-  // - Internet loss keeps the last GPS point visible and heartbeat becomes stale.
+  // Remove only the live session when Firebase determines this client connection
+  // has ended. The unit GPS record is deliberately left alone so a short rural
+  // service interruption retains the last-known location. When connectivity
+  // returns, publishPresence() recreates the session automatically.
+  sessionsRef.child(currentSessionKey).onDisconnect().remove().catch((err) => {
+    console.warn("Unable to register session disconnect cleanup:", err);
+  });
 }
 
 function publishPresence() {
@@ -285,6 +287,23 @@ function getTypedLoginId() {
   return loginValue || sidebarValue;
 }
 
+function isValidDispatchName(name) {
+  // Real-name style only: letters with optional spaces, apostrophes, or hyphens.
+  // Examples: Rickey, Mary Ann, O'Neil, Smith-Jones.
+  return /^[A-Za-z]+(?:[ '\-][A-Za-z]+)*$/.test(name) && name.length >= 2;
+}
+
+function validateLoginId(mode, id) {
+  if (mode !== "dispatch") return true;
+
+  if (!isValidDispatchName(id)) {
+    alert("Enter a real dispatcher name using letters only. Spaces, apostrophes, and hyphens are allowed.");
+    return false;
+  }
+
+  return true;
+}
+
 function login() {
   const modeEl = document.getElementById("loginMode");
   const passwordEl = document.getElementById("loginPassword");
@@ -293,6 +312,7 @@ function login() {
   const password = passwordEl ? passwordEl.value : "";
 
   if (!id) return alert(mode === "dispatch" ? "Enter dispatcher name" : "Enter Unit ID");
+  if (!validateLoginId(mode, id)) return;
 
   if (password === ADMIN_PASSWORD) {
     userRole = "admin";
@@ -347,6 +367,7 @@ async function logout() {
   userMode = null;
   userRole = "user";
   selectedRosterUnitId = null;
+  selectedRosterMode = null;
 
   localStorage.removeItem("avl_unitId");
   localStorage.removeItem("avl_mode");
@@ -1279,6 +1300,37 @@ function formatLastUpdateAge(timestamp) {
   return `${hours} hr ago`;
 }
 
+function getUnitLastGpsTime(data) {
+  return data ? (data.gpsTime || data.time || 0) : 0;
+}
+
+function isUnitExpired(data, session) {
+  const lastGps = getUnitLastGpsTime(data);
+  if (!lastGps) return !isSessionActive(session);
+  return !isSessionActive(session) && (Date.now() - lastGps) > UNIT_EXPIRE_MS;
+}
+
+async function purgeExpiredUnits() {
+  if (!firebaseConnected) return;
+
+  const units = latestUnits || {};
+  const sessions = latestSessions || {};
+  const removals = [];
+
+  Object.keys(units).forEach((id) => {
+    const session = findUnitSession(id, sessions) || null;
+    if (isUnitExpired(units[id], session)) {
+      removals.push(unitsRef.child(id).remove().catch((err) => {
+        console.warn(`Unable to purge expired unit ${id}:`, err);
+      }));
+    }
+  });
+
+  if (removals.length) await Promise.all(removals);
+}
+
+setInterval(purgeExpiredUnits, 5 * 60 * 1000);
+
 //////////////////////////////////////////////////////
 // LIVE UNIT LIST / OTHER UNITS ON MAP
 //////////////////////////////////////////////////////
@@ -1331,8 +1383,10 @@ function buildListEntries(data, sessions) {
 
   Object.keys(data).forEach((id) => {
     const session = findUnitSession(id, sessions) || null;
-    // Always show units that still have GPS data. A stale/missing session usually
-    // means connection lost, not that the GPS point should disappear.
+    if (isUnitExpired(data[id], session)) return;
+
+    // Keep a last-known point through normal coverage gaps, but stop showing
+    // records that have been abandoned for the expiration period.
     entries.push({ id, key: `unit:${id}`, mode: "Unit", unitData: data[id], session });
     addedUnitIds.add(id);
   });
@@ -1455,15 +1509,19 @@ function renderUnitList() {
   // Do not hide a unit just because the heartbeat went stale; bad cell coverage
   // can stop heartbeat updates while the last known GPS point is still useful.
   Object.keys(markers).forEach((id) => {
-    if (!data[id]) {
+    const session = data[id] ? (findUnitSession(id, sessions) || null) : null;
+    if (!data[id] || isUnitExpired(data[id], session)) {
       map.removeLayer(markers[id]);
       delete markers[id];
     }
   });
 
-  // Keep map markers for any unit that still has coordinates.
+  // Keep map markers for recent units, including last-known positions during
+  // short coverage gaps. Expired prior-shift records are not redrawn.
   Object.keys(data).forEach((id) => {
     const u = data[id];
+    const session = findUnitSession(id, sessions) || null;
+    if (isUnitExpired(u, session)) return;
     if (!u || typeof u.lat !== "number" || typeof u.lon !== "number") return;
     updateMap(id, u);
   });
@@ -1532,10 +1590,11 @@ function renderUnitList() {
     `;
 
     div.onclick = () => {
-      if (mode === "Unit") {
+      if (userRole === "admin") {
         selectedRosterUnitId = id;
+        selectedRosterMode = mode;
         const selectedLabel = document.getElementById("selectedUnitLabel");
-        if (selectedLabel) selectedLabel.textContent = `Selected unit: ${id}`;
+        if (selectedLabel) selectedLabel.textContent = `Selected: ${mode} ${id}`;
         updateDeveloperInfo();
       }
 
@@ -1654,38 +1713,44 @@ async function forceRemoveUnit() {
   }
 
   const id = selectedRosterUnitId;
+  const mode = selectedRosterMode || "Unit";
   if (!id) {
-    alert("Select a unit from the roster first");
+    alert("Select a unit or dispatcher from the roster first");
     return;
   }
 
-  if (!confirm(`Remove Unit ${id} from AVL?`)) return;
+  if (!confirm(`Remove ${mode} ${id} from AVL?`)) return;
 
-  if (browserWatchId !== null && id === currentUnitId) {
-    navigator.geolocation.clearWatch(browserWatchId);
-    browserWatchId = null;
+  if (mode === "Dispatch") {
+    await sessionsRef.child(getSessionKey("dispatch", id)).remove().catch(() => {});
+    setStatus(`Dispatcher ${id} removed`, "warn");
+    setFixDetails(`Dispatcher ${id} removed by admin.`);
+  } else {
+    if (browserWatchId !== null && id === currentUnitId) {
+      navigator.geolocation.clearWatch(browserWatchId);
+      browserWatchId = null;
+    }
+
+    if (id === currentUnitId) await disconnectSerialGPS();
+
+    await sessionsRef.child(getSessionKey("unit", id)).remove().catch(() => {});
+    await unitsRef.child(id).remove();
+
+    if (markers[id]) {
+      map.removeLayer(markers[id]);
+      delete markers[id];
+    }
+
+    if (id === currentUnitId) currentUnitId = null;
+
+    setStatus(`Unit ${id} removed`, "warn");
+    setFixDetails(`Unit ${id} removed by admin.`);
   }
-
-  if (id === currentUnitId) {
-    await disconnectSerialGPS();
-  }
-
-  await sessionsRef.child(getSessionKey("unit", id)).remove().catch(() => {});
-  await unitsRef.child(id).remove();
-
-  if (markers[id]) {
-    map.removeLayer(markers[id]);
-    delete markers[id];
-  }
-
-  if (id === currentUnitId) currentUnitId = null;
 
   selectedRosterUnitId = null;
+  selectedRosterMode = null;
   const selectedLabel = document.getElementById("selectedUnitLabel");
-  if (selectedLabel) selectedLabel.textContent = "Selected unit: None";
-
-  setStatus(`Unit ${id} removed`, "warn");
-  setFixDetails(`Unit ${id} removed by admin.`);
+  if (selectedLabel) selectedLabel.textContent = "Selected: None";
   updateDeveloperInfo();
 }
 
