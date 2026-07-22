@@ -18,7 +18,7 @@ const connectedRef = db.ref(".info/connected");
 // Temporary client-side access gate. This is a convenience barrier, not strong security.
 const USER_PASSWORD = "GCSO123";
 const ADMIN_PASSWORD = "GCSOADMIN123";
-const APP_VERSION = "1.1.1-invalid-dispatch-block";
+const APP_VERSION = "1.1.2-startup-order-fix";
 
 //////////////////////////////////////////////////////
 // MAP
@@ -101,6 +101,25 @@ let developerPanelVisible = false;
 let clientSessionId = localStorage.getItem("avl_clientSessionId") || createClientSessionId();
 let publicIpAddress = "Checking...";
 let localEventLog = [];
+
+// Runtime state used by restored sessions, diagnostics, wake lock, and serial GPS.
+// These must be initialized before restoreLogin() or any load/connection callbacks run.
+let wakeLock = null;
+let serialPort = null;
+let serialReader = null;
+let serialKeepReading = false;
+let serialBuffer = "";
+let serialAutoMode = false;
+let serialReconnectTimer = null;
+let currentSerialLabel = "External USB GPS";
+let currentSerialBaud = null;
+let lastValidFixTime = 0;
+let lastFix = null;
+
+const SERIAL_BAUD_RATES = [9600, 4800, 38400, 115200];
+const GPS_PROBE_MS = 2500;
+const GPS_RESCAN_MS = 3000;
+
 localStorage.setItem("avl_clientSessionId", clientSessionId);
 
 const SESSION_STALE_MS = 2 * 60 * 1000; // logged-in heartbeat grace period
@@ -632,8 +651,6 @@ restoreLogin();
 // WAKE LOCK / BACKGROUND SAFEGUARDS
 //////////////////////////////////////////////////////
 
-let wakeLock = null;
-
 async function enableWakeLock() {
   if (!("wakeLock" in navigator)) {
     console.log("Wake Lock not supported in this browser");
@@ -713,21 +730,6 @@ setInterval(() => {
 // SERIAL STATE
 //////////////////////////////////////////////////////
 
-let serialPort = null;
-let serialReader = null;
-let serialKeepReading = false;
-let serialBuffer = "";
-let serialAutoMode = false;
-let serialReconnectTimer = null;
-let currentSerialLabel = "External USB GPS";
-let currentSerialBaud = null;
-
-let lastValidFixTime = 0;
-let lastFix = null;
-
-const SERIAL_BAUD_RATES = [9600, 4800, 38400, 115200];
-const GPS_PROBE_MS = 2500;
-const GPS_RESCAN_MS = 3000;
 
 //////////////////////////////////////////////////////
 // BROWSER SUPPORT CHECK
