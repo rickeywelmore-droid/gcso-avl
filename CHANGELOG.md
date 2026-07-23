@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.5 — 2026-07-22
+- Added a persistent anonymous Device ID for each browser installation.
+- Expanded presence identity with session ID, app version, build date, browser, platform, public IP, time zone, screen size, language, user agent, login time, and heartbeat age.
+- Expanded the admin diagnostics panel for selected roster sessions.
+- Added client-side cleanup for the legacy invalid `dispatch__` record.
+- Included a safe Firebase Rules patch that permanently denies writes to `sessions/dispatch__` without replacing the rest of the database rules.
+
 ## 1.1.4 — 2026-07-22
 - Added dispatcher-only inactivity monitoring.
 - Added a five-minute timeout warning with a live countdown.

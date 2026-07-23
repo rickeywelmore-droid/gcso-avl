@@ -18,13 +18,13 @@ const connectedRef = db.ref(".info/connected");
 /*********************************************************************
  GCSO AVL CONFIGURATION
  --------------------------------------------------------------------
- Version: 1.1.4
+ Version: 1.1.5
  Build: 2026-07-22
 
  Temporary client-side access gate. This is a convenience barrier,
  not strong authentication.
 *********************************************************************/
-const APP_VERSION = "1.1.4";
+const APP_VERSION = "1.1.5";
 const BUILD_DATE = "2026-07-22";
 const USER_PASSWORD = "GCSO123";
 const ADMIN_PASSWORD = "GCSOADMIN123";
@@ -121,6 +121,7 @@ let lastSuccessfulWriteTime = 0;
 let lastFirebaseConnectionChange = Date.now();
 let developerPanelVisible = false;
 let clientSessionId = localStorage.getItem("avl_clientSessionId") || createClientSessionId();
+let clientInstallId = localStorage.getItem("avl_clientInstallId") || createClientInstallId();
 let publicIpAddress = "Checking...";
 let localEventLog = [];
 let dispatchLastActivityTime = Date.now();
@@ -149,6 +150,7 @@ const GPS_PROBE_MS = 2500;
 const GPS_RESCAN_MS = 3000;
 
 localStorage.setItem("avl_clientSessionId", clientSessionId);
+localStorage.setItem("avl_clientInstallId", clientInstallId);
 
 const SESSION_STALE_MS = PRESENCE_TIMEOUT_MINUTES * 60 * 1000; // logged-in heartbeat grace period
 
@@ -309,6 +311,28 @@ function createClientSessionId() {
   return cryptoPart.toUpperCase().match(/.{1,4}/g).join("-");
 }
 
+function createClientInstallId() {
+  const cryptoPart = (window.crypto && crypto.getRandomValues)
+    ? Array.from(crypto.getRandomValues(new Uint8Array(6)))
+        .map((value) => value.toString(16).padStart(2, "0"))
+        .join("")
+    : `${Date.now().toString(16)}${Math.random().toString(16).slice(2, 8)}`;
+
+  return `DEVICE-${cryptoPart.toUpperCase().match(/.{1,4}/g).join("-")}`;
+}
+
+function getScreenLabel() {
+  return `${window.screen?.width || "?"}x${window.screen?.height || "?"}`;
+}
+
+function getTimeZoneLabel() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "Unknown";
+  } catch (_) {
+    return "Unknown";
+  }
+}
+
 function getBrowserLabel() {
   const ua = navigator.userAgent || "";
   let match = ua.match(/Edg\/([\d.]+)/);
@@ -362,11 +386,17 @@ function getSessionDiagnostics(session) {
   const lastUpload = session.lastUploadTime || 0;
 
   return [
+    `Device ID: ${session.deviceId || "Unknown / legacy client"}`,
     `Session ID: ${session.sessionId || "Unknown"}`,
     `Public IP: ${session.publicIp || "Unavailable"}`,
     `Browser: ${session.browser || "Unknown"}`,
     `Platform: ${session.platform || "Unknown"}`,
-    `Version: ${session.appVersion || "Unknown"}`,
+    `Version: ${session.appVersion || "Unknown / legacy client"}`,
+    `Time zone: ${session.timeZone || "Unknown"}`,
+    `Screen: ${session.screen || "Unknown"}`,
+    `Language: ${session.language || "Unknown"}`,
+    `Login time: ${session.loginTime ? new Date(session.loginTime).toLocaleString() : "Unknown"}`,
+    `User agent: ${session.userAgent || "Unavailable"}`,
     `Browser network: ${session.networkOnline === false ? "OFFLINE" : "ONLINE"}`,
     `Firebase: ${session.firebaseConnected === false ? "DISCONNECTED" : "CONNECTED"}`,
     `GPS source: ${formatGpsSource(session.gpsSource)}`,
@@ -545,11 +575,17 @@ function publishPresence() {
     lastSeen: Date.now(),
     serverLastSeen: firebase.database.ServerValue.TIMESTAMP,
     loginTime: sessionLoginTime || Date.now(),
+    deviceId: clientInstallId,
     sessionId: clientSessionId,
     publicIp: publicIpAddress,
     browser: getBrowserLabel(),
     platform: getPlatformLabel(),
     appVersion: APP_VERSION,
+    buildDate: BUILD_DATE,
+    timeZone: getTimeZoneLabel(),
+    screen: getScreenLabel(),
+    language: navigator.language || "Unknown",
+    userAgent: navigator.userAgent || "Unavailable",
     networkOnline: navigator.onLine,
     firebaseConnected: firebaseConnected,
     gpsSource: lastFix?.gpsSource || "none",
@@ -1011,6 +1047,7 @@ function updateDeveloperInfo() {
     `User: ${currentUnitId || "Not logged in"}`,
     `Role: ${userRole}`,
     `Mode: ${userMode || "not logged in"}`,
+    `Device ID: ${clientInstallId}`,
     `Session ID: ${clientSessionId}`,
     `Public IP: ${publicIpAddress}`,
     `Browser: ${getBrowserLabel()}`,
@@ -2061,6 +2098,15 @@ unitsRef.on("value", (snap) => {
 
 sessionsRef.on("value", (snap) => {
   latestSessions = snap.val() || {};
+
+  // Modern clients remove the known invalid legacy dispatcher record when seen.
+  // The Firebase Rules patch included with this release is what permanently
+  // prevents the old browser tab from writing it back.
+  if (latestSessions.dispatch__) {
+    sessionsRef.child("dispatch__").remove().catch(() => {});
+    delete latestSessions.dispatch__;
+  }
+
   scheduleRenderUnitList();
 });
 //////////////////////////////////////////////////////
