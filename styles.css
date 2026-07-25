@@ -420,3 +420,30 @@ html, body {
   flex: 1;
   min-height: 44px;
 }
+
+
+/* Admin five-day audit trail */
+.audit-list { margin-top: 8px; max-height: 420px; overflow-y: auto; border: 1px solid #777; border-radius: 4px; }
+.audit-row { padding: 8px; border-bottom: 1px solid rgba(128,128,128,.35); font-size: 12px; }
+.audit-row:last-child { border-bottom: 0; }
+.audit-head { display:flex; justify-content:space-between; gap:8px; margin-bottom:4px; }
+.audit-head span { opacity:.78; text-align:right; }
+.audit-description { font-weight:600; margin-bottom:3px; }
+.audit-meta { opacity:.72; font-size:11px; overflow-wrap:anywhere; }
+.audit-empty { padding:12px; opacity:.75; }
+#auditUnitFilter { width:100%; margin:6px 0; }
+
+
+/* Audit Trail 2.0 */
+.audit-filters { display:grid; grid-template-columns:1fr; gap:4px; margin:8px 0; }
+.audit-filters label { font-size:11px; font-weight:700; opacity:.85; margin-top:4px; }
+.audit-filters select { width:100%; }
+.audit-row { border-left:4px solid transparent; }
+.audit-row.audit-info { border-left-color:#6c8ebf; }
+.audit-row.audit-warning { border-left-color:#d6a100; }
+.audit-row.audit-action { border-left-color:#c74440; }
+.audit-badge { display:inline-block; padding:2px 6px; border-radius:999px; font-size:10px; font-weight:800; letter-spacing:.4px; margin-bottom:5px; }
+.audit-badge-info { background:rgba(108,142,191,.22); }
+.audit-badge-warning { background:rgba(214,161,0,.22); }
+.audit-badge-action { background:rgba(199,68,64,.22); }
+.audit-type { font-family:ui-monospace, SFMono-Regular, Consolas, monospace; font-size:10px; opacity:.7; margin-bottom:3px; }

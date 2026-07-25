@@ -1,4 +1,21 @@
-# Changelog
+# GCSO AVL Changelog
+
+## 1.1.7 — Audit Trail 2.0 (2026-07-25)
+- Added INFO, WARNING, and ACTION event levels.
+- Separated user, admin, system, and automatic-recovery events.
+- Added button label, control location, target unit, public IP, app version, browser, platform, session ID, and device ID to audit details.
+- Added admin filters for unit/user, event level, and actor/source.
+- Added time since last GPS fix to relevant records without storing coordinates or movement history.
+- Preserved five-day client-side retention.
+
+
+## 1.1.6 — 2026-07-25
+- Added five-day operational audit trail grouped by unit/user.
+- Added admin-only audit viewer and unit filter.
+- Logs button presses, login/logout, GPS serial connect/disconnect, unexpected GPS loss, and network/Firebase changes.
+- Added client-side removal of audit events older than five days when an admin opens the panel.
+- Does not store location breadcrumbs or historical coordinates.
+
 
 ## 1.1.5 — 2026-07-22
 - Added a persistent anonymous Device ID for each browser installation.

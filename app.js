@@ -14,18 +14,19 @@ const db = firebase.database();
 const unitsRef = db.ref("units");
 const sessionsRef = db.ref("sessions");
 const connectedRef = db.ref(".info/connected");
+const auditLogsRef = db.ref("auditLogs");
 
 /*********************************************************************
  GCSO AVL CONFIGURATION
  --------------------------------------------------------------------
- Version: 1.1.5
- Build: 2026-07-22
+ Version: 1.1.7
+ Build: 2026-07-25
 
  Temporary client-side access gate. This is a convenience barrier,
  not strong authentication.
 *********************************************************************/
-const APP_VERSION = "1.1.5";
-const BUILD_DATE = "2026-07-22";
+const APP_VERSION = "1.1.7";
+const BUILD_DATE = "2026-07-25";
 const USER_PASSWORD = "GCSO123";
 const ADMIN_PASSWORD = "GCSOADMIN123";
 const PRESENCE_TIMEOUT_MINUTES = 2;
@@ -35,6 +36,7 @@ const HEARTBEAT_SECONDS = 30;
 const DISPATCH_IDLE_MINUTES = 60;
 const DISPATCH_WARNING_MINUTES = 5;
 const DISPATCH_SOUND_ENABLED = true;
+const AUDIT_RETENTION_DAYS = 5;
 const DEBUG = false;
 
 
@@ -130,6 +132,10 @@ let dispatchCountdownTimer = null;
 let dispatchWarningVisible = false;
 let dispatchWarningOneMinutePlayed = false;
 let audioContext = null;
+let auditListenerRef = null;
+let auditSelectedUnit = "all";
+let auditSelectedSeverity = "all";
+let auditSelectedSource = "all";
 
 // Runtime state used by restored sessions, diagnostics, wake lock, and serial GPS.
 // These must be initialized before restoreLogin() or any load/connection callbacks run.
@@ -163,6 +169,185 @@ const UNIT_EXPIRE_MS = 2 * 60 * 60 * 1000; // 2 hours
 let unitListRenderTimer = null;
 let latestUnitsSnapshot = {};
 
+
+
+//////////////////////////////////////////////////////
+// FIVE-DAY OPERATIONAL AUDIT TRAIL
+//////////////////////////////////////////////////////
+
+const AUDIT_SEVERITIES = Object.freeze({ INFO: "info", WARNING: "warning", ACTION: "action" });
+
+function getAuditUnitKey(unitId) {
+  return sanitizeFirebaseKey(unitId || "unknown");
+}
+
+function normalizeAuditSeverity(value, eventType = "") {
+  const severity = String(value || "").toLowerCase();
+  if (Object.values(AUDIT_SEVERITIES).includes(severity)) return severity;
+  if (/button|manual|logout|force|remove|disconnect_requested/.test(eventType)) return AUDIT_SEVERITIES.ACTION;
+  if (/lost|offline|disconnected|failed|error|unexpected|no_fix/.test(eventType)) return AUDIT_SEVERITIES.WARNING;
+  return AUDIT_SEVERITIES.INFO;
+}
+
+function getAuditSource(value) {
+  const source = String(value || "system").toLowerCase();
+  if (["user", "admin", "system", "automatic"].includes(source)) return source;
+  return "system";
+}
+
+async function writeAuditEvent(eventType, description, details = {}) {
+  if (!currentUnitId || !firebaseConnected) return;
+
+  const unitKey = getAuditUnitKey(currentUnitId);
+  const source = getAuditSource(details.source);
+  const severity = normalizeAuditSeverity(details.severity, eventType);
+  const record = {
+    timestamp: firebase.database.ServerValue.TIMESTAMP,
+    clientTime: Date.now(),
+    unitId: currentUnitId,
+    actorName: details.actorName || currentUnitId,
+    actorType: source === "system" || source === "automatic" ? "SYSTEM" : (userRole === "admin" ? "ADMIN" : String(userMode || "USER").toUpperCase()),
+    mode: userMode || "unknown",
+    role: userRole || "user",
+    severity,
+    eventType,
+    description,
+    source,
+    buttonLabel: details.buttonLabel || "",
+    controlLocation: details.controlLocation || "",
+    targetUnit: details.targetUnit || "",
+    reason: details.reason || "",
+    deviceId: clientInstallId,
+    sessionId: clientSessionId,
+    appVersion: APP_VERSION,
+    browser: getBrowserLabel(),
+    platform: getPlatformLabel(),
+    publicIp: publicIpAddress || "Unknown",
+    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "Unknown",
+    gpsSource: lastFix?.gpsSource || "none",
+    secondsSinceLastFix: lastValidFixTime ? Math.max(0, Math.round((Date.now() - lastValidFixTime) / 1000)) : null,
+    serialConnected: !!serialPort,
+    networkOnline: navigator.onLine,
+    firebaseConnected: firebaseConnected
+  };
+
+  try {
+    await auditLogsRef.child(unitKey).push(record);
+  } catch (err) {
+    console.warn("Audit write failed:", err);
+  }
+}
+
+function formatAuditTime(timestamp) {
+  if (!timestamp) return "Unknown time";
+  return new Date(timestamp).toLocaleString();
+}
+
+function auditSeverityLabel(severity) {
+  return severity === "action" ? "ACTION" : severity === "warning" ? "WARNING" : "INFO";
+}
+
+function renderAuditEntries(snapshot) {
+  const list = document.getElementById("auditTrailList");
+  if (!list) return;
+  const rows = [];
+  snapshot.forEach(unitSnap => {
+    unitSnap.forEach(eventSnap => {
+      const event = eventSnap.val();
+      if (event) rows.push(event);
+    });
+  });
+  rows.sort((a,b) => (b.timestamp || b.clientTime || 0) - (a.timestamp || a.clientTime || 0));
+  const filtered = rows.filter(event => {
+    const unitMatch = auditSelectedUnit === "all" || String(event.unitId) === auditSelectedUnit;
+    const severityMatch = auditSelectedSeverity === "all" || normalizeAuditSeverity(event.severity, event.eventType) === auditSelectedSeverity;
+    const sourceMatch = auditSelectedSource === "all" || getAuditSource(event.source) === auditSelectedSource;
+    return unitMatch && severityMatch && sourceMatch;
+  });
+
+  list.innerHTML = filtered.length ? filtered.map(event => {
+    const severity = normalizeAuditSeverity(event.severity, event.eventType);
+    const details = [
+      `${event.actorType || "SYSTEM"}: ${event.actorName || event.unitId || "Unknown"}`,
+      event.buttonLabel ? `Button: ${event.buttonLabel}` : "",
+      event.targetUnit ? `Target: ${event.targetUnit}` : "",
+      `Source: ${event.source || "system"}`,
+      `Device: ${event.deviceId || "legacy"}`,
+      `Session: ${event.sessionId || "legacy"}`,
+      `App: ${event.appVersion || "legacy"}`,
+      event.browser ? `Browser: ${event.browser}` : "",
+      event.platform ? `Platform: ${event.platform}` : "",
+      event.publicIp ? `IP: ${event.publicIp}` : "",
+      Number.isFinite(event.secondsSinceLastFix) ? `Last GPS fix: ${event.secondsSinceLastFix}s earlier` : ""
+    ].filter(Boolean).join(" · ");
+    return `
+      <div class="audit-row audit-${severity}">
+        <div class="audit-head"><strong>${escapeHtml(event.unitId || "Unknown")}</strong><span>${escapeHtml(formatAuditTime(event.timestamp || event.clientTime))}</span></div>
+        <div class="audit-badge audit-badge-${severity}">${auditSeverityLabel(severity)}</div>
+        <div class="audit-description">${escapeHtml(event.description || event.eventType || "Event")}</div>
+        <div class="audit-type">${escapeHtml(event.eventType || "event")}</div>
+        <div class="audit-meta">${escapeHtml(details)}</div>
+      </div>`;
+  }).join("") : '<div class="audit-empty">No matching audit events found in the last five days.</div>';
+
+  const select = document.getElementById("auditUnitFilter");
+  if (select) {
+    const units = [...new Set(rows.map(r => String(r.unitId || "Unknown")))].sort((a,b)=>a.localeCompare(b, undefined, {numeric:true}));
+    const value = select.value || auditSelectedUnit;
+    select.innerHTML = '<option value="all">All units / users</option>' + units.map(u => `<option value="${escapeHtml(u)}">${escapeHtml(u)}</option>`).join("");
+    select.value = units.includes(value) || value === "all" ? value : "all";
+  }
+}
+
+function loadAuditTrail() {
+  if (userRole !== "admin") return;
+  if (auditListenerRef) auditListenerRef.off();
+  const cutoff = Date.now() - (AUDIT_RETENTION_DAYS * 24 * 60 * 60 * 1000);
+  auditListenerRef = auditLogsRef;
+  auditListenerRef.on("value", renderAuditEntries);
+  cleanupOldAuditEvents(cutoff);
+}
+
+function stopAuditTrail() {
+  if (auditListenerRef) auditListenerRef.off();
+  auditListenerRef = null;
+}
+
+function filterAuditTrail() {
+  auditSelectedUnit = document.getElementById("auditUnitFilter")?.value || "all";
+  auditSelectedSeverity = document.getElementById("auditSeverityFilter")?.value || "all";
+  auditSelectedSource = document.getElementById("auditSourceFilter")?.value || "all";
+  loadAuditTrail();
+}
+
+async function cleanupOldAuditEvents(cutoff = Date.now() - (AUDIT_RETENTION_DAYS * 86400000)) {
+  if (userRole !== "admin") return;
+  try {
+    const snap = await auditLogsRef.once("value");
+    const removals = [];
+    snap.forEach(unitSnap => unitSnap.forEach(eventSnap => {
+      const e = eventSnap.val() || {};
+      if ((e.timestamp || e.clientTime || 0) < cutoff) removals.push(eventSnap.ref.remove());
+    }));
+    await Promise.all(removals);
+  } catch (err) {
+    console.warn("Audit cleanup failed:", err);
+  }
+}
+
+document.addEventListener("click", (event) => {
+  const button = event.target.closest("button");
+  if (!button || !currentUnitId) return;
+  const label = (button.innerText || button.getAttribute("aria-label") || "Button").trim();
+  const adminAction = userRole === "admin" && /remove|disconnect|force/i.test(label);
+  writeAuditEvent("button_pressed", `Button pressed: ${label}`, {
+    source: adminAction ? "admin" : "user",
+    severity: "action",
+    buttonLabel: label,
+    controlLocation: button.closest("#developerPanel") ? "admin audit panel" : button.closest("#adminControls") ? "admin controls" : "main interface",
+    targetUnit: selectedRosterUnitId || ""
+  });
+});
 
 //////////////////////////////////////////////////////
 // DISPATCH INACTIVITY TIMEOUT
@@ -802,9 +987,12 @@ function login() {
   startDispatchIdleMonitor();
   setStatus(`Logged in as ${id} (${mode}${userRole === "admin" ? ", admin" : ""})`, "good");
   addDiagnosticEvent(`Login: ${id} (${mode}${userRole === "admin" ? ", admin" : ""})`);
+  writeAuditEvent("login", `Logged in as ${id} (${mode}${userRole === "admin" ? ", admin" : ""})`, { source: "user", severity: "info" });
 }
 
 async function logout() {
+  await writeAuditEvent("logout", "Logout requested", { source: "user", severity: "action" });
+  stopAuditTrail();
   stopDispatchIdleMonitor();
   stopWatchingOwnDispatchSession();
 
@@ -898,11 +1086,13 @@ connectedRef.on("value", async (snap) => {
   if (firebaseConnected) {
     setNetworkStatus("ONLINE", "good");
     addDiagnosticEvent("Firebase connected");
+    writeAuditEvent("firebase_connected", "Firebase connection restored", { source: "system", severity: "info" });
     if (currentUnitId) publishPresence();
     await flushPendingFix();
   } else {
     setNetworkStatus("FIREBASE DISCONNECTED — GPS WILL KEEP RUNNING", "warn");
     addDiagnosticEvent("Firebase disconnected");
+    writeAuditEvent("firebase_disconnected", "Firebase connection lost", { source: "system", severity: "warning" });
   }
 
   updateDeveloperInfo();
@@ -911,12 +1101,14 @@ connectedRef.on("value", async (snap) => {
 window.addEventListener("offline", () => {
   setNetworkStatus("INTERNET LOST — SAVING LATEST FIX", "warn");
   addDiagnosticEvent("Browser network offline");
+  writeAuditEvent("network_offline", "Browser reported internet connection lost", { source: "system", severity: "warning" });
   updateDeveloperInfo();
 });
 
 window.addEventListener("online", async () => {
   setNetworkStatus("RECONNECTING...", "warn");
   addDiagnosticEvent("Browser network restored");
+  writeAuditEvent("network_online", "Browser reported internet connection restored", { source: "system", severity: "info" });
   if (currentUnitId) publishPresence();
   await flushPendingFix();
   updateDeveloperInfo();
@@ -1023,6 +1215,7 @@ function toggleDeveloperPanel() {
   developerPanelVisible = !developerPanelVisible;
   applyModeUi();
   updateDeveloperInfo();
+  if (developerPanelVisible) loadAuditTrail(); else stopAuditTrail();
 }
 
 function updateDeveloperInfo() {
@@ -1127,6 +1320,7 @@ async function grantSerialGPSPermission() {
   try {
     setStatus("Choose the external GPS receiver one time. After that, Auto Detect can reuse it.", "warn");
     await navigator.serial.requestPort();
+    writeAuditEvent("serial_permission_granted", "Serial GPS permission granted", { source: "user", severity: "action" });
     setStatus("GPS receiver permission saved. Press Auto Detect External GPS.", "good");
   } catch (err) {
     setStatus("GPS permission was not granted: " + err.message, "bad");
@@ -1206,6 +1400,7 @@ async function connectSerialGPS(isRetry = false) {
     serialKeepReading = true;
     setStatus(`External GPS locked: ${currentSerialLabel} @ ${currentSerialBaud} baud`, "good");
     addDiagnosticEvent(`External GPS connected @ ${currentSerialBaud} baud`);
+    writeAuditEvent("serial_connected", `External GPS connected at ${currentSerialBaud} baud`, { source: isRetry ? "automatic" : "user", severity: "info" });
     setFixDetails(
       `GPS Source: External USB GPS\n` +
       `Device: ${currentSerialLabel}\n` +
@@ -1218,6 +1413,7 @@ async function connectSerialGPS(isRetry = false) {
   } catch (err) {
     console.error(err);
     setStatus("External GPS auto-detect failed: " + err.message, "bad");
+    writeAuditEvent("serial_connect_failed", `External GPS connection failed: ${err.message}`, { source: "system", severity: "warning", reason: err.message });
     scheduleSerialRescan("External GPS error");
   }
 }
@@ -1325,6 +1521,7 @@ async function disconnectSerialGPS(manual = true) {
     if (manual) {
       setStatus("External GPS disconnected", "warn");
       addDiagnosticEvent("External GPS disconnected");
+      writeAuditEvent("serial_manual_disconnect", "Manual Disconnect External GPS requested", { source: "user", severity: "action", buttonLabel: "Disconnect External GPS" });
     }
 
   } catch (err) {
@@ -1369,12 +1566,14 @@ async function readSerialLoop() {
   } catch (err) {
     console.error(err);
     setStatus("External GPS read error: " + err.message, "bad");
+    writeAuditEvent("serial_read_error", `External GPS data stream error: ${err.message}`, { source: "system", severity: "warning", reason: err.message });
   } finally {
     if (serialAutoMode) {
       try {
         if (serialPort) await serialPort.close().catch(() => {});
       } catch (_) {}
       serialPort = null;
+      writeAuditEvent("serial_unexpected_disconnect", "External GPS connection/data stream ended unexpectedly; automatic reconnect started", { source: "system", severity: "warning" });
       scheduleSerialRescan("External GPS lost");
     }
   }

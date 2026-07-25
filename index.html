@@ -71,7 +71,7 @@
       <div class="section-title">ADMIN CONTROLS</div>
       <div id="selectedUnitLabel" class="admin-selected">Selected: None</div>
       <button onclick="forceRemoveUnit()">Remove Selected User</button>
-      <button onclick="toggleDeveloperPanel()">Developer / Session Info</button>
+      <button onclick="toggleDeveloperPanel()">Developer / Session Info + Audit</button>
     </div>
 
     <hr>
@@ -81,12 +81,36 @@
     <div id="gpsStatus">GPS: Disconnected</div>
     <div id="fixDetails">Fix details will appear here.</div>
 
-    <div class="app-version">GCSO AVL v1.1.4 · Build 2026-07-22</div>
+    <div class="app-version">GCSO AVL v1.1.7 · Build 2026-07-25</div>
 
     <div id="developerPanel" class="admin-only mode-hidden">
       <div class="section-title">DEVELOPER PANEL</div>
       <div id="developerInfo">Diagnostics loading...</div>
       <div id="rawNmea">Raw NMEA will appear here.</div>
+      <hr>
+      <div class="section-title">FIVE-DAY AUDIT TRAIL</div>
+      <div class="audit-filters">
+        <label for="auditUnitFilter">Unit / user</label>
+        <select id="auditUnitFilter" onchange="filterAuditTrail()">
+          <option value="all">All units / users</option>
+        </select>
+        <label for="auditSeverityFilter">Event level</label>
+        <select id="auditSeverityFilter" onchange="filterAuditTrail()">
+          <option value="all">All levels</option>
+          <option value="action">ACTION — deliberate button/action</option>
+          <option value="warning">WARNING — connection/GPS problem</option>
+          <option value="info">INFO — normal system event</option>
+        </select>
+        <label for="auditSourceFilter">Actor/source</label>
+        <select id="auditSourceFilter" onchange="filterAuditTrail()">
+          <option value="all">All actors</option>
+          <option value="user">User</option>
+          <option value="admin">Admin</option>
+          <option value="system">System</option>
+          <option value="automatic">Automatic recovery</option>
+        </select>
+      </div>
+      <div id="auditTrailList" class="audit-list">Audit events loading...</div>
     </div>
   </div>
 
@@ -107,6 +131,6 @@
   </div>
 </div>
 
-<script src="app.js?v=1.1.5"></script>
+<script src="app.js?v=1.1.7"></script>
 </body>
 </html>
