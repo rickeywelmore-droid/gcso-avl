@@ -454,6 +454,9 @@ body.dark #rawNmea {
 .audit-head span { opacity:.78; text-align:right; }
 .audit-description { font-weight:600; margin-bottom:3px; }
 .audit-meta { opacity:.72; font-size:11px; overflow-wrap:anywhere; }
+.audit-location { margin-top:7px; padding:7px; border-radius:4px; background:rgba(50,110,165,.14); font-size:11px; overflow-wrap:anywhere; }
+.audit-map-link { display:block; width:max-content; max-width:100%; margin-top:5px; color:#73b9ff; font-weight:700; text-decoration:underline; }
+.audit-map-link:hover { color:#a9d5ff; }
 .audit-empty { padding:12px; opacity:.75; }
 #auditUnitFilter { width:100%; margin:6px 0; }
 

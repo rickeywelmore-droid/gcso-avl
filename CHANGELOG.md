@@ -1,5 +1,15 @@
 # GCSO AVL Changelog
 
+## 1.1.9 — Lifecycle Location Audit (2026-08-01)
+- Added last-known latitude, longitude, fix timestamp, and GPS source to unit lifecycle audit events.
+- Location snapshots are recorded for login, restored sessions, logout/logoff, GPS connection and first valid fix, Firebase/network reconnection, and administrator removal.
+- Added a Firebase `onDisconnect` audit record for unexpected session loss caused by a browser close, crash, sleep, power loss, or coverage loss.
+- Clearly distinguishes explicit logout/logoff from an unexpected connection loss.
+- Added an **Open Last GPS in Google Maps** link to qualifying audit entries; it opens in a separate tab.
+- Added a local pending-audit queue so lifecycle events created while offline upload after Firebase reconnects.
+- Coordinates remain event snapshots only; continuous breadcrumb/location history was not added.
+- Firebase rules are unchanged.
+
 ## 1.1.8 — Receiver Health + Recovery Watchdogs (2026-07-31)
 - Added a live External GPS Health panel with receiver identity, USB port ID, baud, connection phase, NMEA sentence type, packet age, fix quality, satellites, HDOP, and Firebase publishing state.
 - Added the same receiver telemetry to unit heartbeats so an admin can diagnose a selected remote unit.
