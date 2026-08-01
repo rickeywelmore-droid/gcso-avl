@@ -59,6 +59,11 @@
       <button onclick="startBrowserGPS()">Start Browser GPS Fallback</button>
       <button onclick="centerOnUnit()">Center On My Unit</button>
 
+      <div id="receiverHealth" class="receiver-health" aria-live="polite">
+        <div class="receiver-health-title">EXTERNAL GPS HEALTH</div>
+        <div id="receiverHealthDetails">Receiver not connected.</div>
+      </div>
+
       <hr>
 
       <button onclick="logOffUnit()">Log Off My Unit</button>
@@ -81,10 +86,11 @@
     <div id="gpsStatus">GPS: Disconnected</div>
     <div id="fixDetails">Fix details will appear here.</div>
 
-    <div class="app-version">GCSO AVL v1.1.7 · Build 2026-07-25</div>
+    <div class="app-version">GCSO AVL v1.1.8 · Build 2026-07-31</div>
 
     <div id="developerPanel" class="admin-only mode-hidden">
       <div class="section-title">DEVELOPER PANEL</div>
+      <button onclick="copyDiagnostics()">Copy Diagnostics</button>
       <div id="developerInfo">Diagnostics loading...</div>
       <div id="rawNmea">Raw NMEA will appear here.</div>
       <hr>
@@ -131,6 +137,6 @@
   </div>
 </div>
 
-<script src="app.js?v=1.1.7"></script>
+<script src="app.js?v=1.1.8"></script>
 </body>
 </html>

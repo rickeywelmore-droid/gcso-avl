@@ -1,5 +1,15 @@
 # GCSO AVL Changelog
 
+## 1.1.8 — Receiver Health + Recovery Watchdogs (2026-07-31)
+- Added a live External GPS Health panel with receiver identity, USB port ID, baud, connection phase, NMEA sentence type, packet age, fix quality, satellites, HDOP, and Firebase publishing state.
+- Added the same receiver telemetry to unit heartbeats so an admin can diagnose a selected remote unit.
+- Added a 12-second NMEA stream watchdog that restarts a serial receiver which remains open but stops sending data.
+- Increased the GPS auto-detect probe window from 2.5 seconds to 5 seconds and retained last-working receiver/baud priority.
+- Added explicit connection phases and a receiver-busy/release diagnostic for ports still held by another application.
+- Added a Firebase recovery watchdog, heartbeat-confirmed connection state, latest-fix republish after reconnection, and contradiction handling for stale `firebaseConnected: false` values.
+- Added receiver telemetry to audit events and a Copy Diagnostics button.
+- Preserved the five-day operational audit trail and existing Firebase rules.
+
 ## 1.1.7 — Audit Trail 2.0 (2026-07-25)
 - Added INFO, WARNING, and ACTION event levels.
 - Separated user, admin, system, and automatic-recovery events.

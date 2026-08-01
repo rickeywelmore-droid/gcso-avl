@@ -302,7 +302,7 @@ html, body {
 
     body.dark #gpsStatus,
     body.dark #fixDetails,
-    body.dark #rawNmea {
+body.dark #rawNmea {
       background: #0d0d0d;
       color: #e6e6e6;
     }
@@ -370,6 +370,30 @@ html, body {
   font-size: 11px;
   text-align: center;
   border-top: 1px solid #2b2b2b;
+}
+
+.receiver-health {
+  margin: 10px 0;
+  padding: 10px;
+  border: 1px solid #3c4b57;
+  border-left: 4px solid #d39b2a;
+  border-radius: 4px;
+  background: #17202a;
+  color: #eef4f8;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-line;
+}
+
+.receiver-health.good { border-left-color: #39c66d; }
+.receiver-health.warn { border-left-color: #d39b2a; }
+.receiver-health.bad { border-left-color: #db4c4c; }
+
+.receiver-health-title {
+  margin-bottom: 5px;
+  color: #9fc5e8;
+  font-weight: 700;
+  letter-spacing: .04em;
 }
 
 

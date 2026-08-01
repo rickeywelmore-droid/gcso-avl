@@ -19,14 +19,14 @@ const auditLogsRef = db.ref("auditLogs");
 /*********************************************************************
  GCSO AVL CONFIGURATION
  --------------------------------------------------------------------
- Version: 1.1.7
- Build: 2026-07-25
+ Version: 1.1.8
+ Build: 2026-07-31
 
  Temporary client-side access gate. This is a convenience barrier,
  not strong authentication.
 *********************************************************************/
-const APP_VERSION = "1.1.7";
-const BUILD_DATE = "2026-07-25";
+const APP_VERSION = "1.1.8";
+const BUILD_DATE = "2026-07-31";
 const USER_PASSWORD = "GCSO123";
 const ADMIN_PASSWORD = "GCSOADMIN123";
 const PRESENCE_TIMEOUT_MINUTES = 2;
@@ -37,6 +37,11 @@ const DISPATCH_IDLE_MINUTES = 60;
 const DISPATCH_WARNING_MINUTES = 5;
 const DISPATCH_SOUND_ENABLED = true;
 const AUDIT_RETENTION_DAYS = 5;
+const GPS_PROBE_MS = 5000;
+const GPS_RESCAN_MS = 3000;
+const SERIAL_STALL_MS = 12000;
+const SERIAL_WATCHDOG_MS = 3000;
+const FIREBASE_RECOVERY_MS = 15000;
 const DEBUG = false;
 
 
@@ -148,12 +153,20 @@ let serialAutoMode = false;
 let serialReconnectTimer = null;
 let currentSerialLabel = "External USB GPS";
 let currentSerialBaud = null;
+let currentSerialPortId = "Not selected";
+let serialConnectionPhase = "Disconnected";
+let serialOpenedTime = 0;
+let lastNmeaPacketTime = 0;
+let lastNmeaSentenceType = "None";
+let serialFixQuality = null;
+let serialSatellites = null;
+let serialHdop = null;
+let serialWatchdogRecoveryInProgress = false;
+let lastFirebaseRecoveryAttempt = 0;
 let lastValidFixTime = 0;
 let lastFix = null;
 
 const SERIAL_BAUD_RATES = [9600, 4800, 38400, 115200];
-const GPS_PROBE_MS = 2500;
-const GPS_RESCAN_MS = 3000;
 
 localStorage.setItem("avl_clientSessionId", clientSessionId);
 localStorage.setItem("avl_clientInstallId", clientInstallId);
@@ -227,6 +240,15 @@ async function writeAuditEvent(eventType, description, details = {}) {
     gpsSource: lastFix?.gpsSource || "none",
     secondsSinceLastFix: lastValidFixTime ? Math.max(0, Math.round((Date.now() - lastValidFixTime) / 1000)) : null,
     serialConnected: !!serialPort,
+    serialReceiver: currentSerialLabel,
+    serialPortId: currentSerialPortId,
+    serialBaud: currentSerialBaud || null,
+    serialPhase: serialConnectionPhase,
+    lastNmeaType: lastNmeaSentenceType,
+    secondsSinceLastNmea: lastNmeaPacketTime ? Math.max(0, Math.round((Date.now() - lastNmeaPacketTime) / 1000)) : null,
+    fixQuality: serialFixQuality,
+    satellites: serialSatellites,
+    hdop: serialHdop,
     networkOnline: navigator.onLine,
     firebaseConnected: firebaseConnected
   };
@@ -278,7 +300,15 @@ function renderAuditEntries(snapshot) {
       event.browser ? `Browser: ${event.browser}` : "",
       event.platform ? `Platform: ${event.platform}` : "",
       event.publicIp ? `IP: ${event.publicIp}` : "",
-      Number.isFinite(event.secondsSinceLastFix) ? `Last GPS fix: ${event.secondsSinceLastFix}s earlier` : ""
+      Number.isFinite(event.secondsSinceLastFix) ? `Last GPS fix: ${event.secondsSinceLastFix}s earlier` : "",
+      event.serialReceiver ? `Receiver: ${event.serialReceiver}` : "",
+      event.serialPortId ? `Port ID: ${event.serialPortId}` : "",
+      event.serialBaud ? `Baud: ${event.serialBaud}` : "",
+      event.lastNmeaType ? `NMEA: ${event.lastNmeaType}` : "",
+      Number.isFinite(event.secondsSinceLastNmea) ? `Last packet: ${event.secondsSinceLastNmea}s earlier` : "",
+      Number.isFinite(event.fixQuality) ? `Fix: ${formatFixQuality(event.fixQuality)}` : "",
+      Number.isFinite(event.satellites) ? `Satellites: ${event.satellites}` : "",
+      Number.isFinite(event.hdop) ? `HDOP: ${event.hdop}` : ""
     ].filter(Boolean).join(" · ");
     return `
       <div class="audit-row audit-${severity}">
@@ -569,6 +599,9 @@ function getSessionDiagnostics(session) {
   const lastSeen = session.serverLastSeen || session.lastSeen || 0;
   const lastGps = session.lastGpsTime || 0;
   const lastUpload = session.lastUploadTime || 0;
+  const heartbeatFresh = lastSeen && (Date.now() - lastSeen) <= SESSION_STALE_MS;
+  const reportedFirebase = session.firebaseConnected === false ? "DISCONNECTED" : "CONNECTED";
+  const effectiveFirebase = heartbeatFresh ? "CONNECTED — heartbeat confirmed" : reportedFirebase;
 
   return [
     `Device ID: ${session.deviceId || "Unknown / legacy client"}`,
@@ -583,11 +616,26 @@ function getSessionDiagnostics(session) {
     `Login time: ${session.loginTime ? new Date(session.loginTime).toLocaleString() : "Unknown"}`,
     `User agent: ${session.userAgent || "Unavailable"}`,
     `Browser network: ${session.networkOnline === false ? "OFFLINE" : "ONLINE"}`,
-    `Firebase: ${session.firebaseConnected === false ? "DISCONNECTED" : "CONNECTED"}`,
+    `Firebase: ${effectiveFirebase}`,
+    ...(heartbeatFresh && session.firebaseConnected === false
+      ? [`Reported client state: DISCONNECTED (stale/contradictory)`]
+      : []),
     `GPS source: ${formatGpsSource(session.gpsSource)}`,
     `Last GPS: ${lastGps ? formatLastUpdateAge(lastGps) : "No GPS fix"}`,
     `Last upload: ${lastUpload ? formatLastUpdateAge(lastUpload) : "No confirmed upload"}`,
-    `Last heartbeat: ${lastSeen ? formatLastUpdateAge(lastSeen) : "Unknown"}`
+    `Last heartbeat: ${lastSeen ? formatLastUpdateAge(lastSeen) : "Unknown"}`,
+    `Serial: ${session.serialConnected ? "CONNECTED" : "DISCONNECTED"}`,
+    `Receiver: ${session.serialReceiver || "Unknown / legacy client"}`,
+    `Port ID: ${session.serialPortId || "Unknown / legacy client"}`,
+    `Baud: ${session.serialBaud || "Unknown"}`,
+    `Serial phase: ${session.serialPhase || "Unknown"}`,
+    `Last NMEA: ${session.lastNmeaType || "Unknown"}`,
+    `Last packet: ${session.lastNmeaTime ? formatLastUpdateAge(session.lastNmeaTime) : "No packet reported"}`,
+    `Fix: ${session.fixQuality === null || session.fixQuality === undefined
+      ? (lastGps ? "Valid position (quality not reported)" : "Not reported")
+      : formatFixQuality(session.fixQuality)}`,
+    `Satellites: ${session.satellites ?? "Unknown"}`,
+    `HDOP: ${session.hdop ?? "Unknown"}`
   ].join("\n");
 }
 
@@ -752,7 +800,7 @@ function publishPresence() {
   currentSessionKey = currentSessionKey || getSessionKey(userMode, currentUnitId);
   configureDisconnectCleanup();
 
-  sessionsRef.child(currentSessionKey).set({
+  const presencePayload = {
     id: currentUnitId,
     displayName: currentUnitId,
     mode: userMode || "unit",
@@ -772,13 +820,39 @@ function publishPresence() {
     language: navigator.language || "Unknown",
     userAgent: navigator.userAgent || "Unavailable",
     networkOnline: navigator.onLine,
-    firebaseConnected: firebaseConnected,
+    // A completed write proves this client can reach Firebase. Publishing true
+    // prevents a stale pre-outage false value from surviving after recovery.
+    firebaseConnected: true,
     gpsSource: lastFix?.gpsSource || "none",
     lastGpsTime: lastFix?.gpsTime || 0,
-    lastUploadTime: lastSuccessfulWriteTime || 0
+    lastUploadTime: lastSuccessfulWriteTime || 0,
+    serialConnected: !!serialPort && serialKeepReading,
+    serialReceiver: currentSerialLabel,
+    serialPortId: currentSerialPortId,
+    serialBaud: currentSerialBaud || 0,
+    serialPhase: serialConnectionPhase,
+    lastNmeaType: lastNmeaSentenceType,
+    lastNmeaTime: lastNmeaPacketTime || 0,
+    fixQuality: serialFixQuality,
+    satellites: serialSatellites,
+    hdop: serialHdop
+  };
+
+  sessionsRef.child(currentSessionKey).set(presencePayload).then(() => {
+    // Heartbeat success is a stronger signal than an old client-side flag.
+    const recoveredByWrite = !firebaseConnected;
+    firebaseConnected = true;
+    setNetworkStatus("ONLINE — HEARTBEAT CONFIRMED", "good");
+    if (recoveredByWrite) {
+      addDiagnosticEvent("Firebase write confirmed recovery");
+      writeAuditEvent("firebase_write_recovered", "Firebase recovery confirmed by successful heartbeat write", { source: "automatic", severity: "info" });
+    }
+    updateDeveloperInfo();
   }).catch((err) => {
     console.error("Presence write failed:", err);
+    firebaseConnected = false;
     setStatus("Presence update failed: " + err.message, "bad");
+    updateDeveloperInfo();
   });
 }
 
@@ -1088,7 +1162,13 @@ connectedRef.on("value", async (snap) => {
     addDiagnosticEvent("Firebase connected");
     writeAuditEvent("firebase_connected", "Firebase connection restored", { source: "system", severity: "info" });
     if (currentUnitId) publishPresence();
-    await flushPendingFix();
+    if (lastPendingFix) {
+      await flushPendingFix();
+    } else if (currentUnitId && lastFix) {
+      // Reassert the latest known fix once after a cellular outage. The GPS
+      // timestamp is preserved, so this does not pretend an old fix is new.
+      await publishUnitData(currentUnitId, lastFix);
+    }
   } else {
     setNetworkStatus("FIREBASE DISCONNECTED — GPS WILL KEEP RUNNING", "warn");
     addDiagnosticEvent("Firebase disconnected");
@@ -1107,6 +1187,7 @@ window.addEventListener("offline", () => {
 
 window.addEventListener("online", async () => {
   setNetworkStatus("RECONNECTING...", "warn");
+  try { db.goOnline(); } catch (_) {}
   addDiagnosticEvent("Browser network restored");
   writeAuditEvent("network_online", "Browser reported internet connection restored", { source: "system", severity: "info" });
   if (currentUnitId) publishPresence();
@@ -1116,8 +1197,21 @@ window.addEventListener("online", async () => {
 
 setInterval(() => {
   updateDeveloperInfo();
+  renderReceiverHealth();
   if (firebaseConnected && lastPendingFix) flushPendingFix();
 }, 10000);
+
+async function attemptFirebaseRecovery() {
+  if (!navigator.onLine || firebaseConnected) return;
+  if ((Date.now() - lastFirebaseRecoveryAttempt) < FIREBASE_RECOVERY_MS) return;
+  lastFirebaseRecoveryAttempt = Date.now();
+  addDiagnosticEvent("Firebase recovery watchdog retrying connection");
+  setNetworkStatus("RECONNECTING TO FIREBASE...", "warn");
+  try { db.goOnline(); } catch (_) {}
+  if (currentUnitId) publishPresence();
+}
+
+setInterval(attemptFirebaseRecovery, FIREBASE_RECOVERY_MS);
 
 //////////////////////////////////////////////////////
 // SERIAL STATE
@@ -1155,6 +1249,72 @@ function setNetworkStatus(label, className = "") {
   if (!el) return;
   el.className = `network-banner ${className}`.trim();
   el.innerText = `NETWORK: ${label}`;
+}
+
+function formatFixQuality(value) {
+  if (value === null || value === undefined || value === "") {
+    return lastFix ? "Valid position (quality not reported)" : "Waiting for fix";
+  }
+  const quality = Number(value);
+  const labels = {
+    0: "No fix",
+    1: "GPS fix",
+    2: "DGPS fix",
+    3: "PPS fix",
+    4: "RTK fixed",
+    5: "RTK float",
+    6: "Estimated",
+    7: "Manual",
+    8: "Simulation"
+  };
+  return Number.isFinite(quality) && labels[quality]
+    ? `${labels[quality]} (${quality})`
+    : (lastFix ? "Valid position" : "Waiting for fix");
+}
+
+function formatPacketAge(timestamp) {
+  if (!timestamp) return "No packet received";
+  const ageMs = Math.max(0, Date.now() - timestamp);
+  if (ageMs < 10000) return `${(ageMs / 1000).toFixed(1)} sec ago`;
+  return formatLastUpdateAge(timestamp);
+}
+
+function renderReceiverHealth() {
+  const panel = document.getElementById("receiverHealth");
+  const details = document.getElementById("receiverHealthDetails");
+  if (!panel || !details) return;
+
+  const packetFresh = !!lastNmeaPacketTime && (Date.now() - lastNmeaPacketTime) <= SERIAL_STALL_MS;
+  const connected = !!serialPort && serialKeepReading;
+  const healthClass = connected && packetFresh ? "good" : connected || serialAutoMode ? "warn" : "bad";
+  panel.className = `receiver-health ${healthClass}`;
+
+  details.innerText = [
+    `Status: ${serialConnectionPhase}`,
+    `Receiver: ${currentSerialLabel}`,
+    `Port ID: ${currentSerialPortId}`,
+    `Baud: ${currentSerialBaud || "Not detected"}`,
+    `Stream: ${packetFresh ? "Receiving" : connected ? "Waiting for NMEA" : "Not receiving"}`,
+    `Last sentence: ${lastNmeaSentenceType}`,
+    `Last packet: ${formatPacketAge(lastNmeaPacketTime)}`,
+    `Fix: ${formatFixQuality(serialFixQuality)}`,
+    `Satellites: ${serialSatellites ?? "Waiting"}`,
+    `HDOP: ${serialHdop ?? "Waiting"}`,
+    `Publishing: ${firebaseConnected ? "Firebase connected" : lastPendingFix ? "Queued for reconnect" : "Firebase disconnected"}`
+  ].join("\n");
+}
+
+async function copyDiagnostics() {
+  if (userRole !== "admin") return alert("Admin access required");
+  updateDeveloperInfo();
+  const text = document.getElementById("developerInfo")?.innerText || "Diagnostics unavailable";
+  try {
+    await navigator.clipboard.writeText(`=== GCSO AVL Diagnostics ===\n${text}`);
+    addDiagnosticEvent("Diagnostics copied to clipboard");
+    setStatus("Diagnostics copied to clipboard", "good");
+  } catch (err) {
+    alert("Unable to copy diagnostics automatically. Select the text in the developer panel and copy it manually.");
+  }
 }
 
 function savePendingFix(id, data) {
@@ -1251,6 +1411,14 @@ function updateDeveloperInfo() {
     `Last Firebase write: ${lastWrite}`,
     `Pending fix: ${lastPendingFix ? "YES" : "NO"}`,
     `Serial: ${serialPort ? `CONNECTED @ ${currentSerialBaud || "?"}` : "DISCONNECTED"}`,
+    `Receiver: ${currentSerialLabel}`,
+    `Port ID: ${currentSerialPortId}`,
+    `Serial phase: ${serialConnectionPhase}`,
+    `Last NMEA: ${lastNmeaSentenceType}`,
+    `Last packet: ${formatPacketAge(lastNmeaPacketTime)}`,
+    `Fix: ${formatFixQuality(serialFixQuality)}`,
+    `Satellites: ${serialSatellites ?? "Unknown"}`,
+    `HDOP: ${serialHdop ?? "Unknown"}`,
     `Wake lock: ${wakeLock ? "ACTIVE" : "INACTIVE"}`,
     "",
     `SELECTED: ${selectedTitle}`,
@@ -1269,10 +1437,21 @@ function getSerialPortLabel(port) {
   if (info.usbVendorId || info.usbProductId) {
     const vid = info.usbVendorId ? info.usbVendorId.toString(16).toUpperCase().padStart(4, "0") : "????";
     const pid = info.usbProductId ? info.usbProductId.toString(16).toUpperCase().padStart(4, "0") : "????";
+    if (vid === "067B") return `Prolific PL2303 GPS (USB ${vid}:${pid})`;
     return `USB GPS VID:${vid} PID:${pid}`;
   }
 
   return "External USB GPS";
+}
+
+function getSerialPortId(port) {
+  const info = port && port.getInfo ? port.getInfo() : {};
+  if (info.usbVendorId || info.usbProductId) {
+    const vid = info.usbVendorId ? info.usbVendorId.toString(16).toUpperCase().padStart(4, "0") : "????";
+    const pid = info.usbProductId ? info.usbProductId.toString(16).toUpperCase().padStart(4, "0") : "????";
+    return `USB ${vid}:${pid} (Chrome does not expose Windows COM number)`;
+  }
+  return "Browser-authorized serial port (COM number unavailable)";
 }
 
 function getSerialPortSignature(port) {
@@ -1299,7 +1478,9 @@ function scheduleSerialRescan(reason = "GPS disconnected") {
   if (!serialAutoMode) return;
   if (serialReconnectTimer) return;
 
+  serialConnectionPhase = `${reason} — retrying in ${GPS_RESCAN_MS / 1000} sec`;
   setStatus(`${reason}. Auto-detect will retry...`, "warn");
+  renderReceiverHealth();
 
   serialReconnectTimer = setTimeout(async () => {
     serialReconnectTimer = null;
@@ -1318,6 +1499,8 @@ async function grantSerialGPSPermission() {
   }
 
   try {
+    serialConnectionPhase = "Waiting for receiver permission";
+    renderReceiverHealth();
     setStatus("Choose the external GPS receiver one time. After that, Auto Detect can reuse it.", "warn");
     await navigator.serial.requestPort();
     writeAuditEvent("serial_permission_granted", "Serial GPS permission granted", { source: "user", severity: "action" });
@@ -1348,6 +1531,8 @@ async function connectSerialGPS(isRetry = false) {
   serialAutoMode = true;
 
   try {
+    serialConnectionPhase = "Releasing previous serial connection";
+    renderReceiverHealth();
     await disconnectSerialGPS(false);
 
     let ports = await navigator.serial.getPorts();
@@ -1372,7 +1557,9 @@ async function connectSerialGPS(isRetry = false) {
       return aMatch - bMatch;
     });
 
+    serialConnectionPhase = `Scanning ${ports.length} authorized serial device(s)`;
     setStatus(`Auto-detect scanning ${ports.length} serial device(s)...`, "warn");
+    renderReceiverHealth();
 
     const found = await findNmeaGpsPort(ports);
 
@@ -1384,11 +1571,14 @@ async function connectSerialGPS(isRetry = false) {
     serialPort = found.port;
     currentSerialBaud = found.baudRate;
     currentSerialLabel = getSerialPortLabel(serialPort);
+    currentSerialPortId = getSerialPortId(serialPort);
     localStorage.setItem("avl_lastGpsSignature", getSerialPortSignature(serialPort));
     localStorage.setItem("avl_lastBaudRate", String(currentSerialBaud));
     const baudSelect = document.getElementById("baudRate");
     if (baudSelect) baudSelect.value = String(currentSerialBaud);
 
+    serialConnectionPhase = `Opening receiver at ${currentSerialBaud} baud`;
+    renderReceiverHealth();
     await serialPort.open({
       baudRate: currentSerialBaud,
       dataBits: 8,
@@ -1398,6 +1588,9 @@ async function connectSerialGPS(isRetry = false) {
     });
 
     serialKeepReading = true;
+    serialOpenedTime = Date.now();
+    lastNmeaPacketTime = 0;
+    serialConnectionPhase = "Serial port open — waiting for NMEA";
     setStatus(`External GPS locked: ${currentSerialLabel} @ ${currentSerialBaud} baud`, "good");
     addDiagnosticEvent(`External GPS connected @ ${currentSerialBaud} baud`);
     writeAuditEvent("serial_connected", `External GPS connected at ${currentSerialBaud} baud`, { source: isRetry ? "automatic" : "user", severity: "info" });
@@ -1407,12 +1600,18 @@ async function connectSerialGPS(isRetry = false) {
       `Baud: ${currentSerialBaud}\n` +
       `Fix: waiting for valid RMC or GGA...`
     );
+    renderReceiverHealth();
 
     readSerialLoop();
 
   } catch (err) {
     console.error(err);
+    const busy = /busy|open|access|networkerror/i.test(String(err?.message || err));
+    serialConnectionPhase = busy
+      ? "Receiver busy or not fully released by another application"
+      : `Connection error: ${err.message}`;
     setStatus("External GPS auto-detect failed: " + err.message, "bad");
+    renderReceiverHealth();
     writeAuditEvent("serial_connect_failed", `External GPS connection failed: ${err.message}`, { source: "system", severity: "warning", reason: err.message });
     scheduleSerialRescan("External GPS error");
   }
@@ -1423,7 +1622,9 @@ async function findNmeaGpsPort(ports) {
 
   for (const port of ports) {
     for (const baudRate of baudCandidates) {
+      serialConnectionPhase = `Checking ${getSerialPortLabel(port)} at ${baudRate} baud`;
       setStatus(`Checking ${getSerialPortLabel(port)} @ ${baudRate} baud...`, "warn");
+      renderReceiverHealth();
 
       const ok = await probePortForNmea(port, baudRate, GPS_PROBE_MS);
       if (ok) {
@@ -1519,10 +1720,15 @@ async function disconnectSerialGPS(manual = true) {
     }
 
     if (manual) {
+      serialConnectionPhase = "Disconnected manually";
+      serialOpenedTime = 0;
+      lastNmeaPacketTime = 0;
+      lastNmeaSentenceType = "None";
       setStatus("External GPS disconnected", "warn");
       addDiagnosticEvent("External GPS disconnected");
       writeAuditEvent("serial_manual_disconnect", "Manual Disconnect External GPS requested", { source: "user", severity: "action", buttonLabel: "Disconnect External GPS" });
     }
+    renderReceiverHealth();
 
   } catch (err) {
     console.error(err);
@@ -1539,11 +1745,12 @@ async function readSerialLoop() {
 
   try {
     while (serialPort && serialPort.readable && serialKeepReading) {
-      serialReader = serialPort.readable.getReader();
+      const activeReader = serialPort.readable.getReader();
+      serialReader = activeReader;
 
       try {
         while (serialKeepReading) {
-          const { value, done } = await serialReader.read();
+          const { value, done } = await activeReader.read();
 
           if (done) break;
           if (!value) continue;
@@ -1559,8 +1766,8 @@ async function readSerialLoop() {
           }
         }
       } finally {
-        serialReader.releaseLock();
-        serialReader = null;
+        try { activeReader.releaseLock(); } catch (_) {}
+        if (serialReader === activeReader) serialReader = null;
       }
     }
   } catch (err) {
@@ -1579,6 +1786,36 @@ async function readSerialLoop() {
   }
 }
 
+async function checkSerialStreamHealth() {
+  renderReceiverHealth();
+  if (!serialAutoMode || !serialPort || !serialKeepReading) return;
+  const streamReferenceTime = lastNmeaPacketTime || serialOpenedTime;
+  if (!streamReferenceTime || (Date.now() - streamReferenceTime) <= SERIAL_STALL_MS) return;
+  if (serialWatchdogRecoveryInProgress) return;
+
+  serialWatchdogRecoveryInProgress = true;
+  const stalledSeconds = Math.round((Date.now() - streamReferenceTime) / 1000);
+  serialConnectionPhase = `NMEA stream stalled for ${stalledSeconds} sec — restarting receiver`;
+  setStatus("External GPS stream stalled. Restarting receiver...", "warn");
+  addDiagnosticEvent(`Serial watchdog detected ${stalledSeconds} sec without NMEA`);
+  writeAuditEvent(
+    "serial_stream_stalled",
+    `External GPS remained connected but no NMEA packet arrived for ${stalledSeconds} seconds; automatic restart started`,
+    { source: "automatic", severity: "warning", reason: "NMEA packet timeout" }
+  );
+  renderReceiverHealth();
+
+  try {
+    await disconnectSerialGPS(false);
+  } finally {
+    scheduleSerialRescan("GPS data stream stalled");
+    setTimeout(() => { serialWatchdogRecoveryInProgress = false; }, GPS_RESCAN_MS + 1000);
+  }
+}
+
+setInterval(checkSerialStreamHealth, SERIAL_WATCHDOG_MS);
+setInterval(renderReceiverHealth, 1000);
+
 //////////////////////////////////////////////////////
 // NMEA HANDLER
 //////////////////////////////////////////////////////
@@ -1587,6 +1824,12 @@ function handleNMEA(sentence) {
   setRawNmea(sentence);
 
   if (!sentence.startsWith("$")) return;
+
+  lastNmeaPacketTime = Date.now();
+  serialWatchdogRecoveryInProgress = false;
+  lastNmeaSentenceType = sentence.split(",")[0].replace(/^\$/, "") || "Unknown";
+  serialConnectionPhase = "Receiving NMEA data";
+  renderReceiverHealth();
 
   if (!isChecksumValid(sentence)) {
     setStatus("Bad NMEA checksum ignored", "warn");
@@ -1705,6 +1948,10 @@ function parseGGA(sentence) {
   const parts = sentence.split(",");
 
   const fixQuality = parseInt(parts[6], 10); // 0 invalid, 1 GPS, 2 DGPS, 4 RTK, etc.
+  serialFixQuality = Number.isFinite(fixQuality) ? fixQuality : null;
+  serialSatellites = parseInt(parts[7], 10) || 0;
+  serialHdop = Number.isFinite(parseFloat(parts[8])) ? parseFloat(parts[8]) : null;
+  renderReceiverHealth();
   if (!fixQuality || fixQuality === 0) {
     showGpsAcquiringStatus("External GPS connected. Waiting for valid RMC/GGA position fix...");
     return;
@@ -1718,8 +1965,8 @@ function parseGGA(sentence) {
     return;
   }
 
-  const satellites = parseInt(parts[7], 10) || 0;
-  const hdop = parseFloat(parts[8]) || null;
+  const satellites = serialSatellites;
+  const hdop = serialHdop;
 
   const data = {
     lat,
@@ -1780,6 +2027,9 @@ function publishFix(data) {
 
   lastValidFixTime = Date.now();
   lastFix = data;
+  serialConnectionPhase = data.gpsSource?.startsWith("serial")
+    ? `${formatFixQuality(serialFixQuality)} acquired`
+    : "Browser GPS active";
   publishPresence();
 
   publishUnitData(currentUnitId, data);
@@ -1800,6 +2050,7 @@ function publishFix(data) {
     (data.satellites ? `Satellites: ${data.satellites}\n` : "") +
     `Updated: ${age}`
   );
+  renderReceiverHealth();
 }
 
 
