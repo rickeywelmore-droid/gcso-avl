@@ -1,5 +1,14 @@
 # GCSO AVL Changelog
 
+## 1.1.10 — Manual GPS Start Location (2026-08-01)
+- Tied the **Auto Detect External GPS** button request to the receiver's first fresh valid GPS fix.
+- Added a clearly labeled ACTION event: **GPS STREAM STARTED HERE**.
+- The start event records the fresh coordinates, time from button press to first fix, and an **Open Last GPS in Google Maps** link.
+- Manual starts remain visible when the audit filter is set to ACTION or User.
+- Automatic receiver recovery is logged separately as an INFO/Automatic event so it cannot be mistaken for a deputy pressing the start button.
+- Browser GPS fallback starts now use the same ACTION-level location behavior.
+- Firebase rules are unchanged.
+
 ## 1.1.9 — Lifecycle Location Audit (2026-08-01)
 - Added last-known latitude, longitude, fix timestamp, and GPS source to unit lifecycle audit events.
 - Location snapshots are recorded for login, restored sessions, logout/logoff, GPS connection and first valid fix, Firebase/network reconnection, and administrator removal.

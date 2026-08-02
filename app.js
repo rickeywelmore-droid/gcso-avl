@@ -19,13 +19,13 @@ const auditLogsRef = db.ref("auditLogs");
 /*********************************************************************
  GCSO AVL CONFIGURATION
  --------------------------------------------------------------------
- Version: 1.1.9
+ Version: 1.1.10
  Build: 2026-08-01
 
  Temporary client-side access gate. This is a convenience barrier,
  not strong authentication.
 *********************************************************************/
-const APP_VERSION = "1.1.9";
+const APP_VERSION = "1.1.10";
 const BUILD_DATE = "2026-08-01";
 const USER_PASSWORD = "GCSO123";
 const ADMIN_PASSWORD = "GCSOADMIN123";
@@ -170,6 +170,7 @@ let serialSatellites = null;
 let serialHdop = null;
 let serialWatchdogRecoveryInProgress = false;
 let serialFixLoggedForConnection = false;
+let pendingManualGpsStart = null;
 let lastFirebaseRecoveryAttempt = 0;
 let lastValidFixTime = 0;
 let lastFix = null;
@@ -1780,6 +1781,12 @@ async function connectSerialGPS(isRetry = false) {
   localStorage.setItem("avl_mode", userMode || "unit");
 
   serialAutoMode = true;
+  if (!isRetry) {
+    pendingManualGpsStart = {
+      requestedAt: Date.now(),
+      buttonLabel: "Auto Detect External GPS"
+    };
+  }
 
   try {
     serialConnectionPhase = "Releasing previous serial connection";
@@ -1977,6 +1984,7 @@ async function disconnectSerialGPS(manual = true) {
     }
 
     if (manual) {
+      pendingManualGpsStart = null;
       serialConnectionPhase = "Disconnected manually";
       serialOpenedTime = 0;
       lastNmeaPacketTime = 0;
@@ -2292,12 +2300,25 @@ function publishFix(data) {
 
   if (data.gpsSource?.startsWith("serial") && !serialFixLoggedForConnection) {
     serialFixLoggedForConnection = true;
-    writeAuditEvent("external_gps_position_connected", "External GPS connected with a valid position fix", {
-      source: "automatic",
-      severity: "info",
-      includeLocation: true,
-      locationData: data
-    });
+    const manualStart = pendingManualGpsStart;
+    const secondsToFix = manualStart?.requestedAt
+      ? Math.max(0, Math.round((Date.now() - manualStart.requestedAt) / 1000))
+      : null;
+    writeAuditEvent(
+      manualStart ? "gps_stream_started_manual" : "gps_stream_resumed_automatic",
+      manualStart
+        ? `GPS STREAM STARTED HERE — Auto Detect External GPS produced its first valid position${secondsToFix !== null ? ` after ${secondsToFix} seconds` : ""}`
+        : "GPS stream resumed automatically with a valid position",
+      {
+        source: manualStart ? "user" : "automatic",
+        severity: manualStart ? "action" : "info",
+        buttonLabel: manualStart?.buttonLabel || "",
+        controlLocation: manualStart ? "GPS controls" : "automatic recovery",
+        includeLocation: true,
+        locationData: data
+      }
+    );
+    pendingManualGpsStart = null;
   }
 
   publishUnitData(currentUnitId, data);
@@ -2865,9 +2886,11 @@ function startBrowserGPS() {
 
     if (!browserGpsConnectedLogged) {
       browserGpsConnectedLogged = true;
-      writeAuditEvent("browser_gps_connected", "Browser GPS fallback connected with a valid position", {
+      writeAuditEvent("browser_gps_connected", "GPS STREAM STARTED HERE — Browser GPS fallback produced its first valid position", {
         source: "user",
-        severity: "info",
+        severity: "action",
+        buttonLabel: "Start Browser GPS Fallback",
+        controlLocation: "GPS controls",
         includeLocation: true,
         locationData: data
       });
