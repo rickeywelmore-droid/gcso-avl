@@ -19,14 +19,14 @@ const auditLogsRef = db.ref("auditLogs");
 /*********************************************************************
  GCSO AVL CONFIGURATION
  --------------------------------------------------------------------
- Version: 1.1.10
- Build: 2026-08-01
+ Version: 1.1.11
+ Build: 2026-08-24
 
  Temporary client-side access gate. This is a convenience barrier,
  not strong authentication.
 *********************************************************************/
-const APP_VERSION = "1.1.10";
-const BUILD_DATE = "2026-08-01";
+const APP_VERSION = "1.1.11";
+const BUILD_DATE = "2026-08-24";
 const USER_PASSWORD = "GCSO123";
 const ADMIN_PASSWORD = "GCSOADMIN123";
 const PRESENCE_TIMEOUT_MINUTES = 2;
@@ -39,6 +39,7 @@ const DISPATCH_SOUND_ENABLED = true;
 const AUDIT_RETENTION_DAYS = 5;
 const GPS_PROBE_MS = 5000;
 const GPS_RESCAN_MS = 3000;
+const SERIAL_REENUMERATION_MS = 2500;
 const SERIAL_STALL_MS = 12000;
 const SERIAL_WATCHDOG_MS = 3000;
 const FIREBASE_RECOVERY_MS = 15000;
@@ -158,6 +159,17 @@ let serialKeepReading = false;
 let serialBuffer = "";
 let serialAutoMode = false;
 let serialReconnectTimer = null;
+let serialReconnectPort = null;
+let lastSuccessfulSerialPort = null;
+let serialDeviceMissing = false;
+let serialDeviceReturnedTime = 0;
+let serialConnectGeneration = 0;
+let serialReadGeneration = 0;
+let serialConnectionAttemptInProgress = false;
+let serialConnectionAttemptQueued = false;
+let queuedConnectionIsManual = false;
+let serialProbeReader = null;
+let serialProbePort = null;
 let currentSerialLabel = "External USB GPS";
 let currentSerialBaud = null;
 let currentSerialPortId = "Not selected";
@@ -1366,6 +1378,12 @@ document.addEventListener("visibilitychange", () => {
     setTimeout(() => {
       map.invalidateSize();
     }, 300);
+
+    // Chrome can pause serial callbacks while the Toughbook is asleep or
+    // undocked. Re-check promptly when the page becomes active again.
+    if (serialAutoMode && !serialPort) {
+      scheduleSerialRescan("AVL resumed — checking for docked GPS receiver", 500, true);
+    }
   }
 });
 
@@ -1711,6 +1729,30 @@ function getSerialPortSignature(port) {
   return `${info.usbVendorId || "unknown"}:${info.usbProductId || "unknown"}`;
 }
 
+function prioritizeAuthorizedSerialPorts(ports) {
+  const savedSignature = localStorage.getItem("avl_lastGpsSignature");
+
+  return [...ports]
+    .map((port, originalIndex) => {
+      let priority = 3;
+      if (port === serialReconnectPort) priority = 0;
+      else if (port === lastSuccessfulSerialPort) priority = 1;
+      else if (savedSignature && getSerialPortSignature(port) === savedSignature) priority = 2;
+      return { port, originalIndex, priority };
+    })
+    .sort((a, b) => (a.priority - b.priority) || (a.originalIndex - b.originalIndex))
+    .map((item) => item.port);
+}
+
+function getSerialEventPort(event) {
+  const candidate = event?.port || event?.target || null;
+  return candidate && typeof candidate.getInfo === "function" ? candidate : null;
+}
+
+function cancelActiveSerialProbe() {
+  if (serialProbeReader) serialProbeReader.cancel().catch(() => {});
+}
+
 function getBaudCandidates() {
   const selected = parseInt(document.getElementById("baudRate").value, 10) || 9600;
   localStorage.setItem("avl_lastBaudRate", String(selected));
@@ -1726,18 +1768,93 @@ function looksLikeNMEA(sentence) {
   );
 }
 
-function scheduleSerialRescan(reason = "GPS disconnected") {
+function scheduleSerialRescan(reason = "GPS disconnected", delayMs = GPS_RESCAN_MS, replaceExisting = false) {
   if (!serialAutoMode) return;
-  if (serialReconnectTimer) return;
+  if (serialReconnectTimer && !replaceExisting) return;
+  if (serialReconnectTimer) clearTimeout(serialReconnectTimer);
 
-  serialConnectionPhase = `${reason} — retrying in ${GPS_RESCAN_MS / 1000} sec`;
+  serialConnectionPhase = `${reason} — retrying in ${Math.round(delayMs / 100) / 10} sec`;
   setStatus(`${reason}. Auto-detect will retry...`, "warn");
   renderReceiverHealth();
 
   serialReconnectTimer = setTimeout(async () => {
     serialReconnectTimer = null;
     if (serialAutoMode) await connectSerialGPS(true);
-  }, GPS_RESCAN_MS);
+  }, delayMs);
+}
+
+async function handleSerialDeviceDisconnected(event) {
+  const removedPort = getSerialEventPort(event);
+  const removedActivePort = !!serialPort && (!removedPort || removedPort === serialPort);
+  const removedProbePort = !!serialProbePort && (!removedPort || removedPort === serialProbePort);
+  const removedLastReceiver = !!removedPort && removedPort === lastSuccessfulSerialPort;
+
+  // Ignore unrelated serial hardware. A receiver is accepted by its NMEA
+  // stream, not by a hard-coded USB vendor/product identifier.
+  if (!removedActivePort && !removedProbePort && !removedLastReceiver) return;
+  if (!serialAutoMode && !removedActivePort && !removedProbePort) return;
+
+  serialDeviceMissing = true;
+  serialDeviceReturnedTime = 0;
+  serialReconnectPort = null;
+  serialConnectionPhase = "GPS receiver removed from USB/dock — waiting for redock";
+  serialConnectGeneration += 1;
+  serialReadGeneration += 1;
+  serialKeepReading = false;
+
+  const readerToCancel = serialReader;
+  serialReader = null;
+  serialPort = null;
+  if (readerToCancel) readerToCancel.cancel().catch(() => {});
+  cancelActiveSerialProbe();
+
+  setStatus("External GPS hardware unavailable. Computer may be undocked; waiting for receiver...", "warn");
+  addDiagnosticEvent("USB GPS removed from host/dock");
+  writeAuditEvent("serial_device_removed", "USB GPS receiver was removed from the computer; waiting for redock or reconnection", {
+    source: "system",
+    severity: "warning",
+    reason: "Web Serial device-disconnect event",
+    includeLocation: true,
+    lookupStoredLocation: true
+  });
+  renderReceiverHealth();
+
+  scheduleSerialRescan("Waiting for docked GPS receiver", GPS_RESCAN_MS, true);
+}
+
+function handleSerialDeviceConnected(event) {
+  const returnedPort = getSerialEventPort(event);
+  if (!returnedPort || !serialAutoMode || userMode === "dispatch") return;
+  if (serialPort && !serialDeviceMissing) return;
+  const wasWaitingForKnownGps = (
+    serialDeviceMissing ||
+    !!lastSuccessfulSerialPort ||
+    !!localStorage.getItem("avl_lastGpsSignature")
+  );
+  if (!wasWaitingForKnownGps) return;
+
+  // Treat the returned port only as the first candidate. It still has to
+  // produce valid NMEA before AVL accepts it as the GPS receiver.
+  serialReconnectPort = returnedPort;
+  serialDeviceReturnedTime = Date.now();
+  serialConnectionPhase = "Serial device detected after redock — waiting for Windows to finish setup";
+  setStatus("Serial device detected after redock. Waiting for Windows, then validating GPS data...", "warn");
+  addDiagnosticEvent("Serial device detected after redock; NMEA validation pending");
+  writeAuditEvent("serial_device_detected", "A serial device reappeared after undocking; GPS validation and automatic reopen started", {
+    source: "automatic",
+    severity: "info",
+    reason: "Web Serial device-connect event",
+    includeLocation: true,
+    lookupStoredLocation: true
+  });
+  renderReceiverHealth();
+
+  scheduleSerialRescan("Serial device detected after redock", SERIAL_REENUMERATION_MS, true);
+}
+
+if ("serial" in navigator) {
+  navigator.serial.addEventListener("disconnect", handleSerialDeviceDisconnected);
+  navigator.serial.addEventListener("connect", handleSerialDeviceConnected);
 }
 
 //////////////////////////////////////////////////////
@@ -1755,6 +1872,7 @@ async function grantSerialGPSPermission() {
     renderReceiverHealth();
     setStatus("Choose the external GPS receiver one time. After that, Auto Detect can reuse it.", "warn");
     await navigator.serial.requestPort();
+    localStorage.setItem("avl_hasAuthorizedGps", "true");
     writeAuditEvent("serial_permission_granted", "Serial GPS permission granted", { source: "user", severity: "action" });
     setStatus("GPS receiver permission saved. Press Auto Detect External GPS.", "good");
   } catch (err) {
@@ -1788,50 +1906,110 @@ async function connectSerialGPS(isRetry = false) {
     };
   }
 
+  // A retry may already be probing a port when the user presses Auto Detect.
+  // Invalidate that probe and queue one clean attempt instead of letting two
+  // scans fight over the same receiver.
+  if (serialConnectionAttemptInProgress) {
+    serialConnectionAttemptQueued = true;
+    queuedConnectionIsManual = queuedConnectionIsManual || !isRetry;
+    serialConnectGeneration += 1;
+    cancelActiveSerialProbe();
+    serialConnectionPhase = "Fresh GPS scan queued — releasing the previous attempt";
+    setStatus("Restarting GPS detection with a fresh serial scan...", "warn");
+    renderReceiverHealth();
+    return;
+  }
+
+  serialConnectionAttemptInProgress = true;
+  const attemptGeneration = ++serialConnectGeneration;
+
+  try {
+    await runSerialGpsConnectionAttempt(isRetry, attemptGeneration);
+  } finally {
+    serialConnectionAttemptInProgress = false;
+
+    if (serialConnectionAttemptQueued && serialAutoMode) {
+      const nextAttemptIsRetry = !queuedConnectionIsManual;
+      serialConnectionAttemptQueued = false;
+      queuedConnectionIsManual = false;
+      setTimeout(() => connectSerialGPS(nextAttemptIsRetry), 250);
+    }
+  }
+}
+
+async function runSerialGpsConnectionAttempt(isRetry, attemptGeneration) {
+  const attemptIsCurrent = () => attemptGeneration === serialConnectGeneration;
+
   try {
     serialConnectionPhase = "Releasing previous serial connection";
     renderReceiverHealth();
     await disconnectSerialGPS(false);
+    if (!attemptIsCurrent()) return;
 
-    let ports = await navigator.serial.getPorts();
-
-    // Browser security requires at least one manual grant before a web page can reuse a USB serial device.
-    // If no receiver has been granted yet, ask once, then future starts should be automatic.
-    if (!ports.length && !isRetry) {
-      setStatus("No authorized GPS receiver found. Choose the external GPS once.", "warn");
-      const firstPort = await navigator.serial.requestPort();
-      ports = [firstPort];
+    // The USB stack needs a moment after redocking before the returning device
+    // can be opened reliably. A single Auto Detect press is enough; retries
+    // continue automatically if enumeration is not finished yet.
+    if (serialDeviceReturnedTime) {
+      const remainingSettleTime = SERIAL_REENUMERATION_MS - (Date.now() - serialDeviceReturnedTime);
+      if (remainingSettleTime > 0) await new Promise(resolve => setTimeout(resolve, remainingSettleTime));
+      if (!attemptIsCurrent()) return;
     }
 
+    let ports = await navigator.serial.getPorts();
+    if (!attemptIsCurrent()) return;
+
+    // Browser security requires at least one manual grant before a web page can reuse a USB serial device.
+    // After an undock, an empty list usually means Windows has not recreated
+    // the device yet. Do not show a misleading permission picker in that case.
+    const hasKnownGpsPermission = (
+      localStorage.getItem("avl_hasAuthorizedGps") === "true" ||
+      !!localStorage.getItem("avl_lastGpsSignature") ||
+      !!lastSuccessfulSerialPort
+    );
+    if (!ports.length && !isRetry && !hasKnownGpsPermission && !serialDeviceMissing) {
+      setStatus("No authorized GPS receiver found. Choose the external GPS once.", "warn");
+      const firstPort = await navigator.serial.requestPort();
+      localStorage.setItem("avl_hasAuthorizedGps", "true");
+      ports = [firstPort];
+    }
+    if (!attemptIsCurrent()) return;
+
     if (!ports.length) {
-      scheduleSerialRescan("No authorized external GPS found");
+      serialDeviceMissing = true;
+      scheduleSerialRescan("Waiting for the docked GPS receiver to appear in Windows");
       return;
     }
 
-    const lastSignature = localStorage.getItem("avl_lastGpsSignature");
-    ports.sort((a, b) => {
-      const aMatch = getSerialPortSignature(a) === lastSignature ? -1 : 0;
-      const bMatch = getSerialPortSignature(b) === lastSignature ? -1 : 0;
-      return aMatch - bMatch;
-    });
+    ports = prioritizeAuthorizedSerialPorts(ports);
 
     serialConnectionPhase = `Scanning ${ports.length} authorized serial device(s)`;
     setStatus(`Auto-detect scanning ${ports.length} serial device(s)...`, "warn");
     renderReceiverHealth();
 
-    const found = await findNmeaGpsPort(ports);
+    const found = await findNmeaGpsPort(ports, attemptGeneration);
+    if (!attemptIsCurrent()) return;
 
     if (!found) {
       scheduleSerialRescan("No valid NMEA GPS stream found");
       return;
     }
 
+    if (serialReconnectTimer) {
+      clearTimeout(serialReconnectTimer);
+      serialReconnectTimer = null;
+    }
+
     serialPort = found.port;
+    lastSuccessfulSerialPort = found.port;
+    serialReconnectPort = null;
+    serialDeviceMissing = false;
+    serialDeviceReturnedTime = 0;
     currentSerialBaud = found.baudRate;
     currentSerialLabel = getSerialPortLabel(serialPort);
     currentSerialPortId = getSerialPortId(serialPort);
     localStorage.setItem("avl_lastGpsSignature", getSerialPortSignature(serialPort));
     localStorage.setItem("avl_lastBaudRate", String(currentSerialBaud));
+    localStorage.setItem("avl_hasAuthorizedGps", "true");
     const baudSelect = document.getElementById("baudRate");
     if (baudSelect) baudSelect.value = String(currentSerialBaud);
 
@@ -1844,6 +2022,11 @@ async function connectSerialGPS(isRetry = false) {
       parity: "none",
       flowControl: "none"
     });
+    if (!attemptIsCurrent()) {
+      await serialPort.close().catch(() => {});
+      if (serialPort === found.port) serialPort = null;
+      return;
+    }
 
     serialKeepReading = true;
     serialFixLoggedForConnection = false;
@@ -1866,9 +2049,11 @@ async function connectSerialGPS(isRetry = false) {
     );
     renderReceiverHealth();
 
-    readSerialLoop();
+    const readGeneration = ++serialReadGeneration;
+    readSerialLoop(serialPort, readGeneration);
 
   } catch (err) {
+    if (!attemptIsCurrent()) return;
     console.error(err);
     const busy = /busy|open|access|networkerror/i.test(String(err?.message || err));
     serialConnectionPhase = busy
@@ -1881,16 +2066,18 @@ async function connectSerialGPS(isRetry = false) {
   }
 }
 
-async function findNmeaGpsPort(ports) {
+async function findNmeaGpsPort(ports, attemptGeneration) {
   const baudCandidates = getBaudCandidates();
 
   for (const port of ports) {
     for (const baudRate of baudCandidates) {
+      if (attemptGeneration !== serialConnectGeneration) return null;
       serialConnectionPhase = `Checking ${getSerialPortLabel(port)} at ${baudRate} baud`;
       setStatus(`Checking ${getSerialPortLabel(port)} @ ${baudRate} baud...`, "warn");
       renderReceiverHealth();
 
-      const ok = await probePortForNmea(port, baudRate, GPS_PROBE_MS);
+      const ok = await probePortForNmea(port, baudRate, GPS_PROBE_MS, attemptGeneration);
+      if (attemptGeneration !== serialConnectGeneration) return null;
       if (ok) {
         return { port, baudRate };
       }
@@ -1900,12 +2087,13 @@ async function findNmeaGpsPort(ports) {
   return null;
 }
 
-async function probePortForNmea(port, baudRate, probeMs) {
+async function probePortForNmea(port, baudRate, probeMs, attemptGeneration) {
   let reader = null;
   let buffer = "";
   const decoder = new TextDecoder();
 
   try {
+    serialProbePort = port;
     await port.open({
       baudRate,
       dataBits: 8,
@@ -1915,14 +2103,17 @@ async function probePortForNmea(port, baudRate, probeMs) {
     });
 
     reader = port.readable.getReader();
+    serialProbeReader = reader;
     const deadline = Date.now() + probeMs;
 
     while (Date.now() < deadline) {
+      if (attemptGeneration !== serialConnectGeneration) break;
       const remaining = Math.max(250, deadline - Date.now());
       const readPromise = reader.read();
       const timeoutPromise = new Promise(resolve => setTimeout(() => resolve({ timeout: true }), remaining));
       const result = await Promise.race([readPromise, timeoutPromise]);
 
+      if (attemptGeneration !== serialConnectGeneration) break;
       if (result.timeout) break;
       if (result.done) break;
       if (!result.value) continue;
@@ -1950,6 +2141,9 @@ async function probePortForNmea(port, baudRate, probeMs) {
       }
     } catch (_) {}
 
+    if (serialProbeReader === reader) serialProbeReader = null;
+    if (serialProbePort === port) serialProbePort = null;
+
     try {
       await port.close();
     } catch (_) {}
@@ -1963,8 +2157,20 @@ async function probePortForNmea(port, baudRate, probeMs) {
 //////////////////////////////////////////////////////
 
 async function disconnectSerialGPS(manual = true) {
-  if (manual) serialAutoMode = false;
+  if (manual) {
+    serialAutoMode = false;
+    serialConnectGeneration += 1;
+    serialConnectionAttemptQueued = false;
+    queuedConnectionIsManual = false;
+    cancelActiveSerialProbe();
+  }
+
+  // Invalidate the currently running read loop before touching the global
+  // port. Its finally block must never close a replacement port opened after
+  // a redock.
+  serialReadGeneration += 1;
   serialKeepReading = false;
+  serialBuffer = "";
 
   if (serialReconnectTimer) {
     clearTimeout(serialReconnectTimer);
@@ -1972,19 +2178,24 @@ async function disconnectSerialGPS(manual = true) {
   }
 
   try {
-    if (serialReader) {
-      await serialReader.cancel().catch(() => {});
-      serialReader.releaseLock();
-      serialReader = null;
+    const readerToClose = serialReader;
+    const portToClose = serialPort;
+    serialReader = null;
+    serialPort = null;
+
+    if (readerToClose) {
+      await readerToClose.cancel().catch(() => {});
+      try { readerToClose.releaseLock(); } catch (_) {}
     }
 
-    if (serialPort) {
-      await serialPort.close().catch(() => {});
-      serialPort = null;
+    if (portToClose) {
+      await portToClose.close().catch(() => {});
     }
 
     if (manual) {
       pendingManualGpsStart = null;
+      serialDeviceMissing = false;
+      serialReconnectPort = null;
       serialConnectionPhase = "Disconnected manually";
       serialOpenedTime = 0;
       lastNmeaPacketTime = 0;
@@ -2005,16 +2216,20 @@ async function disconnectSerialGPS(manual = true) {
 // READ SERIAL LOOP
 //////////////////////////////////////////////////////
 
-async function readSerialLoop() {
+async function readSerialLoop(activePort, readGeneration) {
   const decoder = new TextDecoder();
+  const isCurrentRead = () => (
+    readGeneration === serialReadGeneration &&
+    serialPort === activePort
+  );
 
   try {
-    while (serialPort && serialPort.readable && serialKeepReading) {
-      const activeReader = serialPort.readable.getReader();
+    while (isCurrentRead() && activePort.readable && serialKeepReading) {
+      const activeReader = activePort.readable.getReader();
       serialReader = activeReader;
 
       try {
-        while (serialKeepReading) {
+        while (serialKeepReading && isCurrentRead()) {
           const { value, done } = await activeReader.read();
 
           if (done) break;
@@ -2036,18 +2251,27 @@ async function readSerialLoop() {
       }
     }
   } catch (err) {
+    if (!isCurrentRead()) return;
     console.error(err);
+    serialConnectionPhase = `Serial read error: ${err.message}`;
     setStatus("External GPS read error: " + err.message, "bad");
     writeAuditEvent("serial_read_error", `External GPS data stream error: ${err.message}`, { source: "system", severity: "warning", reason: err.message });
   } finally {
-    if (serialAutoMode) {
-      try {
-        if (serialPort) await serialPort.close().catch(() => {});
-      } catch (_) {}
-      serialPort = null;
+    // A stale read loop from before undocking must not touch the newly opened
+    // replacement port. Only the generation that still owns activePort may
+    // start recovery.
+    if (!isCurrentRead()) return;
+
+    serialKeepReading = false;
+    serialReader = null;
+    serialPort = null;
+    try { await activePort.close().catch(() => {}); } catch (_) {}
+
+    if (!serialAutoMode) return;
+    if (!serialDeviceMissing) {
       writeAuditEvent("serial_unexpected_disconnect", "External GPS connection/data stream ended unexpectedly; automatic reconnect started", { source: "system", severity: "warning" });
-      scheduleSerialRescan("External GPS lost");
     }
+    scheduleSerialRescan(serialDeviceMissing ? "Waiting for docked GPS receiver" : "External GPS lost");
   }
 }
 

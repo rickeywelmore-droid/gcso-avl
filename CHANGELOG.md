@@ -1,5 +1,17 @@
 # GCSO AVL Changelog
 
+## 1.1.11 — Hot-Undock GPS Recovery (2026-08-24)
+- Added Web Serial device-removal and device-return handling for FZ-55 hot-undocking and redocking.
+- Cleanly invalidates stale reader/port objects so an old read loop cannot close a newly re-enumerated receiver.
+- Added a 2.5-second Windows USB-enumeration settling period after a serial device returns.
+- Auto Detect now queues one fresh scan when another retry is already probing, preventing competing attempts from fighting over the same port.
+- Prioritizes the returning in-memory port, the last successful authorized port, and then the last matching USB signature; USB VID/PID is only a preference hint.
+- Every candidate must still produce checksum-valid RMC or GGA NMEA before it is accepted as the GPS receiver.
+- A single Auto Detect press continues retrying if the docked receiver has not appeared in Windows yet, without reopening an unnecessary permission picker.
+- Added audit events for USB GPS removal and serial-device return/validation.
+- Added an immediate receiver check when Chrome becomes visible after sleep or undocking.
+- Firebase rules are unchanged.
+
 ## 1.1.10 — Manual GPS Start Location (2026-08-01)
 - Tied the **Auto Detect External GPS** button request to the receiver's first fresh valid GPS fix.
 - Added a clearly labeled ACTION event: **GPS STREAM STARTED HERE**.
