@@ -20,13 +20,13 @@ const auditMetricsRef = db.ref("auditMetrics");
 /*********************************************************************
  GCSO AVL CONFIGURATION
  --------------------------------------------------------------------
- Version: 1.1.12
+ Version: 1.1.13
  Build: 2026-08-28
 
  Temporary client-side access gate. This is a convenience barrier,
  not strong authentication.
 *********************************************************************/
-const APP_VERSION = "1.1.12";
+const APP_VERSION = "1.1.13";
 const BUILD_DATE = "2026-08-28";
 const USER_PASSWORD = "GCSO123";
 const ADMIN_PASSWORD = "GCSOADMIN123";
@@ -34,6 +34,12 @@ const PRESENCE_TIMEOUT_MINUTES = 2;
 const UNIT_OFFLINE_MINUTES = 15;
 const ABANDONED_UNIT_HOURS = 2;
 const HEARTBEAT_SECONDS = 30;
+const GPS_MOVING_PUBLISH_MS = 5000;
+const GPS_STATIONARY_PUBLISH_MS = 30000;
+const GPS_MOVING_SPEED_MPS = 0.8;
+const GPS_IMMEDIATE_DISTANCE_METERS = 100;
+const GPS_IMMEDIATE_HEADING_DEGREES = 60;
+const GPS_SERIAL_COALESCE_MS = 400;
 const DISPATCH_IDLE_MINUTES = 60;
 const DISPATCH_WARNING_MINUTES = 5;
 const DISPATCH_SOUND_ENABLED = true;
@@ -206,6 +212,17 @@ let closureModalMode = null;
 let closureModalContext = null;
 let pendingPreviousClosureMarker = restoreUnclosedSessionMarker();
 let closureExplanationRequired = !!pendingPreviousClosureMarker;
+let lastNetworkPublishedFix = null;
+let lastNetworkPublishedUnitId = null;
+let lastNetworkPublishTime = 0;
+let queuedUnitPublishData = null;
+let queuedUnitPublishId = null;
+let queuedUnitPublishReason = "";
+let unitPublishTimer = null;
+let unitPublishTimerDue = 0;
+let unitPublishInFlight = false;
+let unitPublishInFlightPromise = null;
+let sessionRosterSubscribed = false;
 
 const SERIAL_BAUD_RATES = [9600, 4800, 38400, 115200];
 
@@ -700,7 +717,7 @@ async function updateAuditStorageEstimate() {
     const percent = (auditStorageEstimateBytes / AUDIT_STORAGE_LIMIT_BYTES) * 100;
     const warning = auditStorageEstimateBytes >= AUDIT_STORAGE_WARNING_BYTES;
     status.classList.toggle("audit-storage-warning", warning);
-    status.textContent = `${warning ? "WARNING — " : ""}Estimated audit storage: ${formatAuditBytes(auditStorageEstimateBytes)} of 1,024 MB (${percent.toFixed(1)}%) · ${eventCount.toLocaleString()} metered v1.1.12 events`;
+    status.textContent = `${warning ? "WARNING — " : ""}Estimated audit storage: ${formatAuditBytes(auditStorageEstimateBytes)} of 1,024 MB (${percent.toFixed(1)}%) · ${eventCount.toLocaleString()} metered v1.1.12+ events`;
   } catch (err) {
     status.textContent = "Audit storage estimate unavailable.";
   }
@@ -1482,6 +1499,7 @@ function applyModeUi() {
   if (userMode === "dispatch") {
     setFixDetails("Dispatch view only. GPS controls are hidden.");
   }
+  configureRosterDataSubscriptions();
   refreshGpsDisconnectLockUi();
 }
 
@@ -1494,7 +1512,7 @@ function startPresenceHeartbeat() {
   }
 
   publishPresence();
-  presenceTimer = setInterval(publishPresence, HEARTBEAT_SECONDS * 1000);
+  presenceTimer = setInterval(() => publishPresence(true), HEARTBEAT_SECONDS * 1000);
 }
 
 function sanitizeFirebaseKey(value) {
@@ -1593,7 +1611,7 @@ function configureDisconnectCleanup() {
   armUnexpectedDisconnectAudit();
 }
 
-function publishPresence() {
+function publishPresence(heartbeatOnly = false) {
   if (!currentUnitId) return;
 
   // Enforce dispatcher-name validation on every heartbeat, not only at login.
@@ -1674,7 +1692,32 @@ function publishPresence() {
     closureExplanationRequired: !!closureExplanationRequired
   };
 
-  sessionsRef.child(currentSessionKey).set(presencePayload).then(() => {
+  const heartbeatPayload = {
+    lastSeen: presencePayload.lastSeen,
+    serverLastSeen: presencePayload.serverLastSeen,
+    networkOnline: presencePayload.networkOnline,
+    firebaseConnected: presencePayload.firebaseConnected,
+    gpsSource: presencePayload.gpsSource,
+    lastGpsTime: presencePayload.lastGpsTime,
+    lastUploadTime: presencePayload.lastUploadTime,
+    serialConnected: presencePayload.serialConnected,
+    serialPhase: presencePayload.serialPhase,
+    lastNmeaType: presencePayload.lastNmeaType,
+    lastNmeaTime: presencePayload.lastNmeaTime,
+    fixQuality: presencePayload.fixQuality,
+    satellites: presencePayload.satellites,
+    hdop: presencePayload.hdop,
+    gpsDisconnectLocked: presencePayload.gpsDisconnectLocked,
+    gpsDisconnectLockStartedAt: presencePayload.gpsDisconnectLockStartedAt,
+    gpsDisconnectLockExpiresAt: presencePayload.gpsDisconnectLockExpiresAt,
+    closureExplanationRequired: presencePayload.closureExplanationRequired
+  };
+
+  const presenceWrite = heartbeatOnly
+    ? sessionsRef.child(currentSessionKey).update(heartbeatPayload)
+    : sessionsRef.child(currentSessionKey).set(presencePayload);
+
+  presenceWrite.then(() => {
     // Heartbeat success is a stronger signal than an old client-side flag.
     const recoveredByWrite = !firebaseConnected;
     firebaseConnected = true;
@@ -1947,6 +1990,7 @@ async function logout() {
   }
 
   await disconnectSerialGPS(true, { bypassLock: true, endSession: true, reason: "Explicit logout" });
+  await stopLiveUnitPublishing(currentUnitId);
   await stopPresence(true);
 
   if (currentUnitId && userMode !== "dispatch") {
@@ -2057,12 +2101,12 @@ connectedRef.on("value", async (snap) => {
     });
     if (currentUnitId) publishPresence();
     await flushPendingAuditEvents();
-    if (lastPendingFix) {
-      await flushPendingFix();
-    } else if (currentUnitId && lastFix) {
+    const pendingFixPublished = lastPendingFix ? await flushPendingFix() : false;
+    if (!pendingFixPublished && currentUnitId && lastFix) {
       // Reassert the latest known fix once after a cellular outage. The GPS
       // timestamp is preserved, so this does not pretend an old fix is new.
-      await publishUnitData(currentUnitId, lastFix);
+      queueUnitFixForPublish(currentUnitId, lastFix, { force: true, reason: "firebase_recovery" });
+      await flushQueuedUnitPublish("firebase_recovery");
     }
   } else {
     setNetworkStatus("FIREBASE DISCONNECTED — GPS WILL KEEP RUNNING", "warn");
@@ -2200,7 +2244,7 @@ function renderReceiverHealth() {
     `Fix: ${formatFixQuality(serialFixQuality)}`,
     `Satellites: ${serialSatellites ?? "Waiting"}`,
     `HDOP: ${serialHdop ?? "Waiting"}`,
-    `Publishing: ${firebaseConnected ? "Firebase connected" : lastPendingFix ? "Queued for reconnect" : "Firebase disconnected"}`
+    `Publishing: ${firebaseConnected ? "Firebase connected · adaptive 5s moving / 30s stopped" : lastPendingFix ? "Queued for reconnect" : "Firebase disconnected"}`
   ].join("\n");
 }
 
@@ -2254,6 +2298,11 @@ async function publishUnitData(id, data) {
   try {
     await unitsRef.child(id).set(data);
     lastSuccessfulWriteTime = Date.now();
+    if (id === currentUnitId && isValidLatLon(data.lat, data.lon)) {
+      lastNetworkPublishedFix = data;
+      lastNetworkPublishedUnitId = id;
+      lastNetworkPublishTime = lastSuccessfulWriteTime;
+    }
     clearPendingFix(data);
     updateDeveloperInfo();
     return true;
@@ -2266,8 +2315,172 @@ async function publishUnitData(id, data) {
 }
 
 async function flushPendingFix() {
-  if (!firebaseConnected || !lastPendingFix || !lastPendingUnitId) return;
-  await publishUnitData(lastPendingUnitId, lastPendingFix);
+  if (!firebaseConnected || !currentUnitId || !lastPendingFix || !lastPendingUnitId) return false;
+  if (lastPendingUnitId !== currentUnitId) return false;
+  if (unitPublishInFlightPromise) await unitPublishInFlightPromise.catch(() => {});
+  if (!lastPendingFix || !lastPendingUnitId) return true;
+
+  const pendingId = lastPendingUnitId;
+  const pendingData = lastPendingFix;
+  queueUnitFixForPublish(pendingId, pendingData, { force: true, reason: "offline_fix_recovery" });
+  return flushQueuedUnitPublish("offline_fix_recovery");
+}
+
+function getGpsPublishInterval(data) {
+  return Number(data?.speed || 0) >= GPS_MOVING_SPEED_MPS
+    ? GPS_MOVING_PUBLISH_MS
+    : GPS_STATIONARY_PUBLISH_MS;
+}
+
+function getGpsDistanceMeters(a, b) {
+  if (!a || !b || !isValidLatLon(a.lat, a.lon) || !isValidLatLon(b.lat, b.lon)) return 0;
+  const toRadians = (degrees) => degrees * Math.PI / 180;
+  const earthRadiusMeters = 6371000;
+  const latitudeDelta = toRadians(b.lat - a.lat);
+  const longitudeDelta = toRadians(b.lon - a.lon);
+  const latitudeA = toRadians(a.lat);
+  const latitudeB = toRadians(b.lat);
+  const haversine =
+    Math.sin(latitudeDelta / 2) ** 2 +
+    Math.cos(latitudeA) * Math.cos(latitudeB) * Math.sin(longitudeDelta / 2) ** 2;
+  return earthRadiusMeters * 2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine));
+}
+
+function getHeadingDifference(a, b) {
+  const headingA = Number(a?.heading);
+  const headingB = Number(b?.heading);
+  if (!Number.isFinite(headingA) || !Number.isFinite(headingB)) return 0;
+  const difference = Math.abs(((headingB - headingA + 540) % 360) - 180);
+  return Number.isFinite(difference) ? difference : 0;
+}
+
+function shouldImmediatelyPublishFix(id, data) {
+  if (!lastNetworkPublishedFix || lastNetworkPublishedUnitId !== id) return false;
+
+  const wasMoving = Number(lastNetworkPublishedFix.speed || 0) >= GPS_MOVING_SPEED_MPS;
+  const isMoving = Number(data?.speed || 0) >= GPS_MOVING_SPEED_MPS;
+  if (!wasMoving && isMoving) return true;
+  if (getGpsDistanceMeters(lastNetworkPublishedFix, data) >= GPS_IMMEDIATE_DISTANCE_METERS) return true;
+  return isMoving && getHeadingDifference(lastNetworkPublishedFix, data) >= GPS_IMMEDIATE_HEADING_DEGREES;
+}
+
+function clearUnitPublishTimer() {
+  if (unitPublishTimer) clearTimeout(unitPublishTimer);
+  unitPublishTimer = null;
+  unitPublishTimerDue = 0;
+}
+
+function armUnitPublishTimer(delayMs, reason) {
+  const safeDelay = Math.max(0, Math.round(delayMs || 0));
+  const due = Date.now() + safeDelay;
+  if (unitPublishTimer && unitPublishTimerDue <= due) return;
+
+  clearUnitPublishTimer();
+  unitPublishTimerDue = due;
+  unitPublishTimer = setTimeout(() => {
+    unitPublishTimer = null;
+    unitPublishTimerDue = 0;
+    flushQueuedUnitPublish(reason);
+  }, safeDelay);
+}
+
+async function flushQueuedUnitPublish(reason = "scheduled") {
+  if (unitPublishInFlight || !firebaseConnected || !queuedUnitPublishData || !queuedUnitPublishId) return false;
+
+  clearUnitPublishTimer();
+  const id = queuedUnitPublishId;
+  const data = queuedUnitPublishData;
+  const publishReason = queuedUnitPublishReason || reason;
+  queuedUnitPublishId = null;
+  queuedUnitPublishData = null;
+  queuedUnitPublishReason = "";
+
+  if (
+    lastNetworkPublishedUnitId === id &&
+    lastNetworkPublishedFix?.gpsTime &&
+    lastNetworkPublishedFix.gpsTime === data.gpsTime
+  ) {
+    return true;
+  }
+
+  unitPublishInFlight = true;
+  unitPublishInFlightPromise = publishUnitData(id, data);
+  const succeeded = await unitPublishInFlightPromise;
+  unitPublishInFlightPromise = null;
+  unitPublishInFlight = false;
+  debugLog(`Live GPS publish ${succeeded ? "completed" : "failed"}: ${publishReason}`);
+
+  if (queuedUnitPublishData && queuedUnitPublishId) {
+    const interval = getGpsPublishInterval(queuedUnitPublishData);
+    const elapsed = Math.max(0, Date.now() - lastNetworkPublishTime);
+    armUnitPublishTimer(succeeded ? Math.max(0, interval - elapsed) : 1000, "queued_after_write");
+  }
+
+  return succeeded;
+}
+
+async function stopLiveUnitPublishing(id, discardOfflineFix = true) {
+  clearUnitPublishTimer();
+  if (!id || queuedUnitPublishId === id) {
+    queuedUnitPublishId = null;
+    queuedUnitPublishData = null;
+    queuedUnitPublishReason = "";
+  }
+
+  // Let a write that already reached Firebase finish before the explicit
+  // logout removal. This prevents a late write from resurrecting the unit.
+  if (unitPublishInFlightPromise) await unitPublishInFlightPromise.catch(() => {});
+
+  if (discardOfflineFix && (!id || lastPendingUnitId === id)) {
+    lastPendingFix = null;
+    lastPendingUnitId = null;
+    localStorage.removeItem("avl_pendingUnitId");
+    localStorage.removeItem("avl_pendingFix");
+  }
+
+  if (!id || lastNetworkPublishedUnitId === id) {
+    lastNetworkPublishedFix = null;
+    lastNetworkPublishedUnitId = null;
+    lastNetworkPublishTime = 0;
+  }
+}
+
+function queueUnitFixForPublish(id, data, options = {}) {
+  if (!id || !data || !isValidLatLon(data.lat, data.lon)) return;
+
+  queuedUnitPublishId = id;
+  queuedUnitPublishData = data;
+  queuedUnitPublishReason = options.reason || "gps_update";
+
+  if (!firebaseConnected) {
+    // Keep only the newest offline position. It is restored after connectivity
+    // returns instead of replaying an expensive trail of stale fixes.
+    savePendingFix(id, data);
+    return;
+  }
+
+  if (options.force) {
+    armUnitPublishTimer(0, queuedUnitPublishReason);
+    return;
+  }
+
+  const firstPublishForUnit = !lastNetworkPublishedFix || lastNetworkPublishedUnitId !== id;
+  if (firstPublishForUnit) {
+    // RMC and GGA normally arrive as a pair. A short delay lets the richer GGA
+    // data replace the RMC-only candidate so one combined fix is sent.
+    const delay = data.gpsSource?.startsWith("serial") ? GPS_SERIAL_COALESCE_MS : 0;
+    armUnitPublishTimer(delay, "first_fix");
+    return;
+  }
+
+  if (shouldImmediatelyPublishFix(id, data)) {
+    armUnitPublishTimer(0, "significant_movement");
+    return;
+  }
+
+  const interval = getGpsPublishInterval(data);
+  const elapsed = Math.max(0, Date.now() - lastNetworkPublishTime);
+  armUnitPublishTimer(Math.max(0, interval - elapsed), queuedUnitPublishReason);
 }
 
 function toggleDeveloperPanel() {
@@ -2310,6 +2523,11 @@ function updateDeveloperInfo() {
     `Browser network: ${navigator.onLine ? "ONLINE" : "OFFLINE"}`,
     `Last GPS: ${lastGps}`,
     `Last Firebase write: ${lastWrite}`,
+    `Live GPS cadence: 5 sec moving / 30 sec stopped`,
+    `Presence heartbeat: ${HEARTBEAT_SECONDS} sec dynamic-field update`,
+    `Last live GPS publish: ${lastNetworkPublishTime ? formatLastUpdateAge(lastNetworkPublishTime) : "Not published yet"}`,
+    `Live GPS fix queued: ${queuedUnitPublishData ? "YES" : "NO"}`,
+    `Full session roster feed: ${sessionRosterSubscribed ? "ENABLED (dispatch/admin)" : "DISABLED (bandwidth-saving unit mode)"}`,
     `Pending fix: ${lastPendingFix ? "YES" : "NO"}`,
     `Pending audit events: ${pendingAuditEvents.length}`,
     `Serial: ${serialPort ? `CONNECTED @ ${currentSerialBaud || "?"}` : "DISCONNECTED"}`,
@@ -3191,7 +3409,6 @@ function publishFix(data) {
   serialConnectionPhase = data.gpsSource?.startsWith("serial")
     ? `${formatFixQuality(serialFixQuality)} acquired`
     : "Browser GPS active";
-  publishPresence();
 
   if (data.gpsSource?.startsWith("serial") && !serialFixLoggedForConnection) {
     serialFixLoggedForConnection = true;
@@ -3217,7 +3434,7 @@ function publishFix(data) {
     pendingManualGpsStart = null;
   }
 
-  publishUnitData(currentUnitId, data);
+  queueUnitFixForPublish(currentUnitId, data, { reason: "external_gps" });
   updateMap(currentUnitId, data);
 
   const age = new Date(data.gpsTime).toLocaleTimeString();
@@ -3411,7 +3628,9 @@ function isUnitExpired(data, session) {
 }
 
 async function purgeExpiredUnits() {
-  if (!firebaseConnected) return;
+  // Only clients with the full session roster can safely distinguish an
+  // abandoned unit from a logged-in unit that has not acquired GPS.
+  if (!firebaseConnected || !sessionRosterSubscribed) return;
 
   const units = latestUnits || {};
   const sessions = latestSessions || {};
@@ -3726,24 +3945,69 @@ function renderUnitList() {
   addSection("DISPATCH", groups.dispatch);
 }
 
-unitsRef.on("value", (snap) => {
-  latestUnits = snap.val() || {};
+function handleUnitAddedOrChanged(snap) {
+  if (!snap?.key) return;
+  latestUnits[snap.key] = snap.val();
   scheduleRenderUnitList();
-});
+}
 
-sessionsRef.on("value", (snap) => {
-  latestSessions = snap.val() || {};
+function handleUnitRemoved(snap) {
+  if (!snap?.key) return;
+  delete latestUnits[snap.key];
+  scheduleRenderUnitList();
+}
+
+unitsRef.on("child_added", handleUnitAddedOrChanged);
+unitsRef.on("child_changed", handleUnitAddedOrChanged);
+unitsRef.on("child_removed", handleUnitRemoved);
+
+function handleSessionAddedOrChanged(snap) {
+  if (!snap?.key) return;
+  latestSessions[snap.key] = snap.val();
 
   // Modern clients remove the known invalid legacy dispatcher record when seen.
   // The Firebase Rules patch included with this release is what permanently
   // prevents the old browser tab from writing it back.
-  if (latestSessions.dispatch__) {
+  if (snap.key === "dispatch__") {
     sessionsRef.child("dispatch__").remove().catch(() => {});
     delete latestSessions.dispatch__;
   }
 
   scheduleRenderUnitList();
-});
+}
+
+function handleSessionRemoved(snap) {
+  if (!snap?.key) return;
+  delete latestSessions[snap.key];
+  scheduleRenderUnitList();
+}
+
+function shouldSubscribeToSessionRoster() {
+  return !!currentUnitId && (userMode === "dispatch" || userRole === "admin");
+}
+
+function startSessionRosterSubscription() {
+  if (sessionRosterSubscribed) return;
+  sessionRosterSubscribed = true;
+  sessionsRef.on("child_added", handleSessionAddedOrChanged);
+  sessionsRef.on("child_changed", handleSessionAddedOrChanged);
+  sessionsRef.on("child_removed", handleSessionRemoved);
+}
+
+function stopSessionRosterSubscription() {
+  if (!sessionRosterSubscribed) return;
+  sessionsRef.off("child_added", handleSessionAddedOrChanged);
+  sessionsRef.off("child_changed", handleSessionAddedOrChanged);
+  sessionsRef.off("child_removed", handleSessionRemoved);
+  sessionRosterSubscribed = false;
+  latestSessions = {};
+  scheduleRenderUnitList();
+}
+
+function configureRosterDataSubscriptions() {
+  if (shouldSubscribeToSessionRoster()) startSessionRosterSubscription();
+  else stopSessionRosterSubscription();
+}
 //////////////////////////////////////////////////////
 // BROWSER GPS FALLBACK
 //////////////////////////////////////////////////////
@@ -3780,8 +4044,7 @@ function startBrowserGPS() {
     lastFix = data;
     lastFixUnitId = id;
     lastValidFixTime = data.gpsTime;
-    publishPresence();
-    publishUnitData(id, data);
+    queueUnitFixForPublish(id, data, { reason: "browser_gps" });
     updateMap(id, data);
 
     if (!browserGpsConnectedLogged) {
@@ -3835,6 +4098,7 @@ async function logOffUnit() {
   }
 
   await disconnectSerialGPS(true, { bypassLock: true, endSession: true, reason: "Unit logoff" });
+  await stopLiveUnitPublishing(id);
   await stopPresence(true);
   await unitsRef.child(id).remove();
   clearGpsDisconnectLock();
@@ -3845,6 +4109,7 @@ async function logOffUnit() {
   }
 
   currentUnitId = null;
+  configureRosterDataSubscriptions();
 
   setStatus("Unit logged off", "warn");
   setFixDetails("Unit logged off.");
@@ -3889,6 +4154,7 @@ async function forceRemoveUnit() {
     if (id === currentUnitId) {
       markSessionClosureCompleted();
       await disconnectSerialGPS(true, { bypassLock: true, endSession: true, reason: "Administrator removal" });
+      await stopLiveUnitPublishing(id);
       clearGpsDisconnectLock();
     }
 
@@ -3900,7 +4166,10 @@ async function forceRemoveUnit() {
       delete markers[id];
     }
 
-    if (id === currentUnitId) currentUnitId = null;
+    if (id === currentUnitId) {
+      currentUnitId = null;
+      configureRosterDataSubscriptions();
+    }
 
     setStatus(`Unit ${id} removed`, "warn");
     setFixDetails(`Unit ${id} removed by admin.`);
