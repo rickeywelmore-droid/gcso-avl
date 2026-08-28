@@ -15,18 +15,19 @@ const unitsRef = db.ref("units");
 const sessionsRef = db.ref("sessions");
 const connectedRef = db.ref(".info/connected");
 const auditLogsRef = db.ref("auditLogs");
+const auditMetricsRef = db.ref("auditMetrics");
 
 /*********************************************************************
  GCSO AVL CONFIGURATION
  --------------------------------------------------------------------
- Version: 1.1.11
- Build: 2026-08-24
+ Version: 1.1.12
+ Build: 2026-08-28
 
  Temporary client-side access gate. This is a convenience barrier,
  not strong authentication.
 *********************************************************************/
-const APP_VERSION = "1.1.11";
-const BUILD_DATE = "2026-08-24";
+const APP_VERSION = "1.1.12";
+const BUILD_DATE = "2026-08-28";
 const USER_PASSWORD = "GCSO123";
 const ADMIN_PASSWORD = "GCSOADMIN123";
 const PRESENCE_TIMEOUT_MINUTES = 2;
@@ -36,7 +37,15 @@ const HEARTBEAT_SECONDS = 30;
 const DISPATCH_IDLE_MINUTES = 60;
 const DISPATCH_WARNING_MINUTES = 5;
 const DISPATCH_SOUND_ENABLED = true;
-const AUDIT_RETENTION_DAYS = 5;
+const AUDIT_RETENTION_DAYS = 365;
+const AUDIT_DEFAULT_VIEW_DAYS = 7;
+const AUDIT_MAX_QUERY_DAYS = 31;
+const AUDIT_PAGE_SIZE = 100;
+const AUDIT_STORAGE_LIMIT_BYTES = 1024 * 1024 * 1024;
+const AUDIT_STORAGE_WARNING_BYTES = 750 * 1024 * 1024;
+const AUDIT_LEGACY_RESERVE_BYTES = 1024 * 1024;
+const GPS_DISCONNECT_LOCK_HOURS = 10;
+const GPS_DISCONNECT_LOCK_MS = GPS_DISCONNECT_LOCK_HOURS * 60 * 60 * 1000;
 const GPS_PROBE_MS = 5000;
 const GPS_RESCAN_MS = 3000;
 const SERIAL_REENUMERATION_MS = 2500;
@@ -139,10 +148,15 @@ let dispatchCountdownTimer = null;
 let dispatchWarningVisible = false;
 let dispatchWarningOneMinutePlayed = false;
 let audioContext = null;
-let auditListenerRef = null;
 let auditSelectedUnit = "all";
 let auditSelectedSeverity = "all";
 let auditSelectedSource = "all";
+let auditLoadedRows = [];
+let auditKnownUnitKeys = [];
+let auditCurrentPage = 1;
+let auditLoading = false;
+let auditLastRange = null;
+let auditStorageEstimateBytes = 0;
 let disconnectAuditRef = null;
 let lastDisconnectAuditArmTime = 0;
 let disconnectAuditHasLocation = false;
@@ -187,6 +201,11 @@ let lastFirebaseRecoveryAttempt = 0;
 let lastValidFixTime = 0;
 let lastFix = null;
 let lastFixUnitId = null;
+let gpsDisconnectLockTimer = null;
+let closureModalMode = null;
+let closureModalContext = null;
+let pendingPreviousClosureMarker = restoreUnclosedSessionMarker();
+let closureExplanationRequired = !!pendingPreviousClosureMarker;
 
 const SERIAL_BAUD_RATES = [9600, 4800, 38400, 115200];
 
@@ -207,7 +226,7 @@ let latestUnitsSnapshot = {};
 
 
 //////////////////////////////////////////////////////
-// FIVE-DAY OPERATIONAL AUDIT TRAIL
+// ONE-YEAR INDEXED OPERATIONAL AUDIT TRAIL
 //////////////////////////////////////////////////////
 
 const AUDIT_SEVERITIES = Object.freeze({ INFO: "info", WARNING: "warning", ACTION: "action" });
@@ -219,8 +238,8 @@ function getAuditUnitKey(unitId) {
 function normalizeAuditSeverity(value, eventType = "") {
   const severity = String(value || "").toLowerCase();
   if (Object.values(AUDIT_SEVERITIES).includes(severity)) return severity;
-  if (/button|manual|logout|force|remove|disconnect_requested/.test(eventType)) return AUDIT_SEVERITIES.ACTION;
-  if (/lost|offline|disconnected|failed|error|unexpected|no_fix/.test(eventType)) return AUDIT_SEVERITIES.WARNING;
+  if (/button|manual|logout|force|remove|disconnect_requested|closure/.test(eventType)) return AUDIT_SEVERITIES.ACTION;
+  if (/lost|offline|disconnected|failed|error|unexpected|no_fix|denied|unexplained/.test(eventType)) return AUDIT_SEVERITIES.WARNING;
   return AUDIT_SEVERITIES.INFO;
 }
 
@@ -284,6 +303,29 @@ function queuePendingAuditEvent(unitKey, eventKey, record) {
   }
 }
 
+function estimateUtf8Bytes(value) {
+  const text = typeof value === "string" ? value : JSON.stringify(value);
+  try {
+    return new TextEncoder().encode(text).length;
+  } catch (_) {
+    return text.length * 2;
+  }
+}
+
+function getAuditMetricDay(timestamp = Date.now()) {
+  return new Date(timestamp).toISOString().slice(0, 10);
+}
+
+function recordAuditUsage(unitKey, eventKey, record) {
+  const day = getAuditMetricDay(record.clientTime || Date.now());
+  const estimatedBytes = estimateUtf8Bytes({ [unitKey]: { [eventKey]: { ...record, timestamp: Date.now() } } });
+  auditMetricsRef.child("daily").child(day).transaction((current) => ({
+    eventCount: Number(current?.eventCount || 0) + 1,
+    estimatedBytes: Number(current?.estimatedBytes || 0) + estimatedBytes,
+    updatedAt: Date.now()
+  })).catch((err) => console.warn("Audit usage estimate update failed:", err));
+}
+
 async function flushPendingAuditEvents() {
   if (!firebaseConnected || !pendingAuditEvents.length) return;
   const remaining = [];
@@ -308,11 +350,13 @@ async function flushPendingAuditEvents() {
           };
         }
       }
-      await auditLogsRef.child(item.unitKey).child(item.eventKey).set({
+      const uploadedRecord = {
         ...record,
         timestamp: firebase.database.ServerValue.TIMESTAMP,
         uploadedAfterReconnect: true
-      });
+      };
+      await auditLogsRef.child(item.unitKey).child(item.eventKey).set(uploadedRecord);
+      recordAuditUsage(item.unitKey, item.eventKey, uploadedRecord);
     } catch (_) {
       remaining.push(item);
     }
@@ -330,9 +374,11 @@ async function writeAuditEvent(eventType, description, details = {}) {
   const source = getAuditSource(details.source);
   const severity = normalizeAuditSeverity(details.severity, eventType);
   const location = details.includeLocation ? await resolveAuditLocation(details) : null;
+  const clientTime = Date.now();
   const record = {
     timestamp: firebase.database.ServerValue.TIMESTAMP,
-    clientTime: Date.now(),
+    clientTime,
+    eventTime: clientTime,
     unitId: recordUnitId,
     actorName: details.actorName || actorUnitId,
     actorType: source === "system" || source === "automatic" ? "SYSTEM" : (userRole === "admin" ? "ADMIN" : String(userMode || "USER").toUpperCase()),
@@ -346,6 +392,8 @@ async function writeAuditEvent(eventType, description, details = {}) {
     controlLocation: details.controlLocation || "",
     targetUnit: details.targetUnit || "",
     reason: details.reason || "",
+    closureReason: details.closureReason || "",
+    closureNotes: details.closureNotes || "",
     deviceId: clientInstallId,
     sessionId: clientSessionId,
     appVersion: APP_VERSION,
@@ -388,6 +436,7 @@ async function writeAuditEvent(eventType, description, details = {}) {
 
   try {
     await eventRef.set(record);
+    recordAuditUsage(unitKey, eventKey, record);
   } catch (err) {
     console.warn("Audit write failed:", err);
     queuePendingAuditEvent(unitKey, eventKey, record);
@@ -407,25 +456,121 @@ function getAuditMapUrl(lat, lon) {
   return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${lat},${lon}`)}`;
 }
 
-function renderAuditEntries(snapshot) {
-  const list = document.getElementById("auditTrailList");
-  if (!list) return;
+function toDateInputValue(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function parseAuditDate(value, endOfDay = false) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value || "");
+  if (!match) return null;
+  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), endOfDay ? 23 : 0, endOfDay ? 59 : 0, endOfDay ? 59 : 0, endOfDay ? 999 : 0);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function getAuditRangeFromInputs(showErrors = true) {
+  const startValue = document.getElementById("auditStartDate")?.value || "";
+  const endValue = document.getElementById("auditEndDate")?.value || "";
+  const startDate = parseAuditDate(startValue, false);
+  const endDate = parseAuditDate(endValue, true);
+  if (!startDate || !endDate || startDate > endDate) {
+    if (showErrors) alert("Choose a valid audit start and end date.");
+    return null;
+  }
+  const calendarStart = Date.UTC(startDate.getFullYear(), startDate.getMonth(), startDate.getDate());
+  const calendarEnd = Date.UTC(endDate.getFullYear(), endDate.getMonth(), endDate.getDate());
+  const dayCount = Math.round((calendarEnd - calendarStart) / 86400000) + 1;
+  if (dayCount > AUDIT_MAX_QUERY_DAYS) {
+    if (showErrors) alert(`Load no more than ${AUDIT_MAX_QUERY_DAYS} days at once. Use monthly exports for longer archives.`);
+    return null;
+  }
+  const retentionCutoff = Date.now() - (AUDIT_RETENTION_DAYS * 86400000);
+  if (endDate.getTime() < retentionCutoff || startDate.getTime() < retentionCutoff - 86400000) {
+    if (showErrors) alert(`The live audit trail retains ${AUDIT_RETENTION_DAYS} days.`);
+    return null;
+  }
+  return { startMs: startDate.getTime(), endMs: endDate.getTime(), startValue, endValue, dayCount };
+}
+
+function setDefaultAuditRange(force = false) {
+  const start = document.getElementById("auditStartDate");
+  const end = document.getElementById("auditEndDate");
+  const month = document.getElementById("auditExportMonth");
+  if (!start || !end) return;
+  const today = new Date();
+  const firstDay = new Date(today.getFullYear(), today.getMonth(), today.getDate() - (AUDIT_DEFAULT_VIEW_DAYS - 1));
+  const oldestDay = new Date(today.getFullYear(), today.getMonth(), today.getDate() - (AUDIT_RETENTION_DAYS - 1));
+  const todayValue = toDateInputValue(today);
+  const oldestValue = toDateInputValue(oldestDay);
+  start.min = oldestValue;
+  start.max = todayValue;
+  end.min = oldestValue;
+  end.max = todayValue;
+  if (force || !start.value) start.value = toDateInputValue(firstDay);
+  if (force || !end.value) end.value = todayValue;
+  if (month) {
+    month.min = oldestValue.slice(0, 7);
+    month.max = todayValue.slice(0, 7);
+    if (force || !month.value) month.value = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}`;
+  }
+}
+
+async function getAuditUnitKeys() {
+  try {
+    const response = await fetch(`${firebaseConfig.databaseURL}/auditLogs.json?shallow=true`, { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    const keys = data && typeof data === "object" ? Object.keys(data).filter(Boolean) : [];
+    auditKnownUnitKeys = keys;
+    return keys;
+  } catch (err) {
+    console.warn("Unable to list audit unit buckets:", err);
+    return auditKnownUnitKeys;
+  }
+}
+
+async function fetchAuditRange(startMs, endMs) {
+  const unitKeys = await getAuditUnitKeys();
+  const snapshots = await Promise.all(unitKeys.map(async (unitKey) => {
+    const snapshot = await auditLogsRef.child(unitKey)
+      .orderByChild("timestamp")
+      .startAt(startMs)
+      .endAt(endMs)
+      .once("value");
+    return { unitKey, snapshot };
+  }));
   const rows = [];
-  snapshot.forEach(unitSnap => {
-    unitSnap.forEach(eventSnap => {
+  snapshots.forEach(({ unitKey, snapshot }) => {
+    snapshot.forEach((eventSnap) => {
       const event = eventSnap.val();
-      if (event) rows.push(event);
+      if (event && typeof event === "object") rows.push({ ...event, _unitKey: unitKey, _eventKey: eventSnap.key });
     });
   });
-  rows.sort((a,b) => (b.timestamp || b.clientTime || 0) - (a.timestamp || a.clientTime || 0));
-  const filtered = rows.filter(event => {
+  rows.sort((a, b) => (b.timestamp || b.clientTime || 0) - (a.timestamp || a.clientTime || 0));
+  return rows;
+}
+
+function getFilteredAuditRows() {
+  return auditLoadedRows.filter((event) => {
     const unitMatch = auditSelectedUnit === "all" || String(event.unitId) === auditSelectedUnit;
     const severityMatch = auditSelectedSeverity === "all" || normalizeAuditSeverity(event.severity, event.eventType) === auditSelectedSeverity;
     const sourceMatch = auditSelectedSource === "all" || getAuditSource(event.source) === auditSelectedSource;
     return unitMatch && severityMatch && sourceMatch;
   });
+}
 
-  list.innerHTML = filtered.length ? filtered.map(event => {
+function renderAuditEntries() {
+  const list = document.getElementById("auditTrailList");
+  if (!list) return;
+  const filtered = getFilteredAuditRows();
+  const totalPages = Math.max(1, Math.ceil(filtered.length / AUDIT_PAGE_SIZE));
+  auditCurrentPage = Math.min(Math.max(1, auditCurrentPage), totalPages);
+  const pageStart = (auditCurrentPage - 1) * AUDIT_PAGE_SIZE;
+  const pageRows = filtered.slice(pageStart, pageStart + AUDIT_PAGE_SIZE);
+
+  list.innerHTML = pageRows.length ? pageRows.map(event => {
     const severity = normalizeAuditSeverity(event.severity, event.eventType);
     const hasLocation = typeof event.lastGpsLat === "number" && typeof event.lastGpsLon === "number" &&
       isValidLatLon(event.lastGpsLat, event.lastGpsLon);
@@ -440,6 +585,8 @@ function renderAuditEntries(snapshot) {
       `${event.actorType || "SYSTEM"}: ${event.actorName || event.unitId || "Unknown"}`,
       event.buttonLabel ? `Button: ${event.buttonLabel}` : "",
       event.targetUnit ? `Target: ${event.targetUnit}` : "",
+      event.closureReason ? `Closure reason: ${event.closureReason}` : "",
+      event.closureNotes ? `Notes: ${event.closureNotes}` : "",
       `Source: ${event.source || "system"}`,
       `Device: ${event.deviceId || "legacy"}`,
       `Session: ${event.sessionId || "legacy"}`,
@@ -466,50 +613,198 @@ function renderAuditEntries(snapshot) {
         <div class="audit-meta">${escapeHtml(details)}</div>
         ${locationHtml}
       </div>`;
-  }).join("") : '<div class="audit-empty">No matching audit events found in the last five days.</div>';
+  }).join("") : '<div class="audit-empty">No matching audit events found in the selected date range.</div>';
 
   const select = document.getElementById("auditUnitFilter");
   if (select) {
-    const units = [...new Set(rows.map(r => String(r.unitId || "Unknown")))].sort((a,b)=>a.localeCompare(b, undefined, {numeric:true}));
-    const value = select.value || auditSelectedUnit;
+    const units = [...new Set(auditLoadedRows.map(r => String(r.unitId || "Unknown")))].sort((a,b)=>a.localeCompare(b, undefined, {numeric:true}));
+    const value = auditSelectedUnit;
     select.innerHTML = '<option value="all">All units / users</option>' + units.map(u => `<option value="${escapeHtml(u)}">${escapeHtml(u)}</option>`).join("");
     select.value = units.includes(value) || value === "all" ? value : "all";
   }
+
+  const pageLabel = document.getElementById("auditPageLabel");
+  const previous = document.getElementById("auditPreviousPage");
+  const next = document.getElementById("auditNextPage");
+  if (pageLabel) pageLabel.textContent = `Page ${auditCurrentPage} of ${totalPages} · ${filtered.length} matching event${filtered.length === 1 ? "" : "s"}`;
+  if (previous) previous.disabled = auditCurrentPage <= 1;
+  if (next) next.disabled = auditCurrentPage >= totalPages;
 }
 
-function loadAuditTrail() {
-  if (userRole !== "admin") return;
-  if (auditListenerRef) auditListenerRef.off();
-  const cutoff = Date.now() - (AUDIT_RETENTION_DAYS * 24 * 60 * 60 * 1000);
-  auditListenerRef = auditLogsRef;
-  auditListenerRef.on("value", renderAuditEntries);
-  cleanupOldAuditEvents(cutoff);
+async function loadAuditTrail() {
+  if (userRole !== "admin" || auditLoading) return;
+  setDefaultAuditRange();
+  const range = getAuditRangeFromInputs();
+  if (!range) return;
+  auditLoading = true;
+  auditLastRange = range;
+  const list = document.getElementById("auditTrailList");
+  const rangeStatus = document.getElementById("auditRangeStatus");
+  if (list) list.innerHTML = '<div class="audit-empty">Loading indexed audit events…</div>';
+  if (rangeStatus) rangeStatus.textContent = `Loading ${range.startValue} through ${range.endValue}…`;
+  try {
+    auditLoadedRows = await fetchAuditRange(range.startMs, range.endMs);
+    if (auditSelectedUnit !== "all" && !auditLoadedRows.some((event) => String(event.unitId) === auditSelectedUnit)) {
+      auditSelectedUnit = "all";
+    }
+    auditCurrentPage = 1;
+    if (rangeStatus) rangeStatus.textContent = `Loaded ${auditLoadedRows.length} events · ${range.startValue} through ${range.endValue}`;
+    renderAuditEntries();
+    updateAuditStorageEstimate();
+    cleanupOldAuditEvents();
+  } catch (err) {
+    console.error("Audit range load failed:", err);
+    if (list) list.innerHTML = `<div class="audit-empty">Audit load failed: ${escapeHtml(err.message)}</div>`;
+    if (rangeStatus) rangeStatus.textContent = "Audit range could not be loaded.";
+  } finally {
+    auditLoading = false;
+  }
 }
 
 function stopAuditTrail() {
-  if (auditListenerRef) auditListenerRef.off();
-  auditListenerRef = null;
+  auditLoading = false;
 }
 
 function filterAuditTrail() {
   auditSelectedUnit = document.getElementById("auditUnitFilter")?.value || "all";
   auditSelectedSeverity = document.getElementById("auditSeverityFilter")?.value || "all";
   auditSelectedSource = document.getElementById("auditSourceFilter")?.value || "all";
-  loadAuditTrail();
+  auditCurrentPage = 1;
+  renderAuditEntries();
+}
+
+function changeAuditPage(direction) {
+  auditCurrentPage += direction;
+  renderAuditEntries();
+  document.getElementById("auditTrailList")?.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+function formatAuditBytes(bytes) {
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+async function updateAuditStorageEstimate() {
+  const status = document.getElementById("auditStorageStatus");
+  if (!status) return;
+  try {
+    const snapshot = await auditMetricsRef.child("daily").once("value");
+    let measuredBytes = 0;
+    let eventCount = 0;
+    snapshot.forEach((daySnap) => {
+      const metric = daySnap.val() || {};
+      measuredBytes += Number(metric.estimatedBytes || 0);
+      eventCount += Number(metric.eventCount || 0);
+    });
+    auditStorageEstimateBytes = Math.ceil((measuredBytes + AUDIT_LEGACY_RESERVE_BYTES) * 1.25);
+    const percent = (auditStorageEstimateBytes / AUDIT_STORAGE_LIMIT_BYTES) * 100;
+    const warning = auditStorageEstimateBytes >= AUDIT_STORAGE_WARNING_BYTES;
+    status.classList.toggle("audit-storage-warning", warning);
+    status.textContent = `${warning ? "WARNING — " : ""}Estimated audit storage: ${formatAuditBytes(auditStorageEstimateBytes)} of 1,024 MB (${percent.toFixed(1)}%) · ${eventCount.toLocaleString()} metered v1.1.12 events`;
+  } catch (err) {
+    status.textContent = "Audit storage estimate unavailable.";
+  }
 }
 
 async function cleanupOldAuditEvents(cutoff = Date.now() - (AUDIT_RETENTION_DAYS * 86400000)) {
   if (userRole !== "admin") return;
   try {
-    const snap = await auditLogsRef.once("value");
-    const removals = [];
-    snap.forEach(unitSnap => unitSnap.forEach(eventSnap => {
-      const e = eventSnap.val() || {};
-      if ((e.timestamp || e.clientTime || 0) < cutoff) removals.push(eventSnap.ref.remove());
-    }));
-    await Promise.all(removals);
+    const unitKeys = auditKnownUnitKeys.length ? auditKnownUnitKeys : await getAuditUnitKeys();
+    for (const unitKey of unitKeys) {
+      let found = true;
+      while (found) {
+        const snapshot = await auditLogsRef.child(unitKey)
+          .orderByChild("timestamp")
+          .endAt(cutoff - 1)
+          .limitToFirst(250)
+          .once("value");
+        const removals = {};
+        snapshot.forEach((eventSnap) => {
+          const event = eventSnap.val() || {};
+          const eventTime = Number(event.timestamp || event.clientTime || 0);
+          if (eventTime > 0 && eventTime < cutoff) removals[`${unitKey}/${eventSnap.key}`] = null;
+        });
+        const count = Object.keys(removals).length;
+        found = count === 250;
+        if (count) await auditLogsRef.update(removals);
+      }
+    }
+
+    const metricsSnapshot = await auditMetricsRef.child("daily").once("value");
+    const metricRemovals = {};
+    metricsSnapshot.forEach((daySnap) => {
+      const dayTime = Date.parse(`${daySnap.key}T00:00:00Z`);
+      if (Number.isFinite(dayTime) && dayTime < cutoff) metricRemovals[daySnap.key] = null;
+    });
+    if (Object.keys(metricRemovals).length) await auditMetricsRef.child("daily").update(metricRemovals);
   } catch (err) {
-    console.warn("Audit cleanup failed:", err);
+    console.warn("One-year audit cleanup failed:", err);
+  }
+}
+
+function getAuditExportRows(rows) {
+  return rows.map((event) => {
+    const clean = { ...event, eventKey: event._eventKey };
+    delete clean._unitKey;
+    delete clean._eventKey;
+    return clean;
+  });
+}
+
+function escapeAuditCsv(value) {
+  const text = value === null || value === undefined ? "" : String(value);
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function downloadAuditFile(filename, text, mimeType) {
+  const blob = new Blob([text], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function exportAuditMonth(format) {
+  if (userRole !== "admin") return alert("Admin access required");
+  const monthValue = document.getElementById("auditExportMonth")?.value || "";
+  const match = /^(\d{4})-(\d{2})$/.exec(monthValue);
+  if (!match) return alert("Choose a month to export.");
+  const start = new Date(Number(match[1]), Number(match[2]) - 1, 1, 0, 0, 0, 0);
+  const end = new Date(Number(match[1]), Number(match[2]), 0, 23, 59, 59, 999);
+  const oldestAllowed = Date.now() - (AUDIT_RETENTION_DAYS * 86400000);
+  if (end.getTime() < oldestAllowed) return alert(`Only the most recent ${AUDIT_RETENTION_DAYS} days remain in live storage.`);
+
+  const status = document.getElementById("auditRangeStatus");
+  if (status) status.textContent = `Preparing ${monthValue} ${String(format).toUpperCase()} archive…`;
+  try {
+    const rows = await fetchAuditRange(start.getTime(), end.getTime());
+    const exported = getAuditExportRows(rows);
+    if (format === "json") {
+      downloadAuditFile(`GCSO_AVL_Audit_${monthValue}.json`, JSON.stringify({
+        generatedAt: new Date().toISOString(),
+        month: monthValue,
+        retentionDays: AUDIT_RETENTION_DAYS,
+        eventCount: exported.length,
+        events: exported
+      }, null, 2), "application/json");
+    } else {
+      const fields = ["eventKey", "timestamp", "clientTime", "unitId", "actorName", "actorType", "severity", "eventType", "description", "source", "buttonLabel", "targetUnit", "reason", "closureReason", "closureNotes", "deviceId", "sessionId", "appVersion", "browser", "platform", "publicIp", "lastGpsLat", "lastGpsLon", "lastGpsTimestamp", "lastGpsSource", "serialReceiver", "serialPortId", "serialBaud", "fixQuality", "satellites", "hdop"];
+      const csv = [fields.join(","), ...exported.map((event) => fields.map((field) => escapeAuditCsv(event[field])).join(","))].join("\r\n");
+      downloadAuditFile(`GCSO_AVL_Audit_${monthValue}.csv`, csv, "text/csv;charset=utf-8");
+    }
+    writeAuditEvent("audit_month_exported", `Administrator exported ${monthValue} audit archive as ${String(format).toUpperCase()}`, {
+      source: "admin",
+      severity: "action",
+      reason: `${exported.length} events exported`
+    });
+    if (status) status.textContent = `Exported ${exported.length} events for ${monthValue}.`;
+  } catch (err) {
+    console.error("Audit export failed:", err);
+    if (status) status.textContent = `Audit export failed: ${err.message}`;
   }
 }
 
@@ -517,7 +812,7 @@ document.addEventListener("click", (event) => {
   const button = event.target.closest("button");
   if (!button || !currentUnitId) return;
   const label = (button.innerText || button.getAttribute("aria-label") || "Button").trim();
-  const adminAction = userRole === "admin" && /remove|disconnect|force/i.test(label);
+  const adminAction = userRole === "admin" && /remove|disconnect|force|audit|export/i.test(label);
   writeAuditEvent("button_pressed", `Button pressed: ${label}`, {
     source: adminAction ? "admin" : "user",
     severity: "action",
@@ -525,6 +820,321 @@ document.addEventListener("click", (event) => {
     controlLocation: button.closest("#developerPanel") ? "admin audit panel" : button.closest("#adminControls") ? "admin controls" : "main interface",
     targetUnit: selectedRosterUnitId || ""
   });
+});
+
+//////////////////////////////////////////////////////
+// TEN-HOUR GPS DISCONNECT LOCK
+//////////////////////////////////////////////////////
+
+const GPS_DISCONNECT_LOCK_KEY = "avl_gpsDisconnectLock";
+const OPEN_SESSION_MARKER_KEY = "avl_openSessionMarker";
+const PLANNED_CLOSURE_UNTIL_KEY = "avl_plannedClosureUntil";
+
+function readGpsDisconnectLock() {
+  try {
+    const lock = JSON.parse(localStorage.getItem(GPS_DISCONNECT_LOCK_KEY) || "null");
+    if (!lock || !Number.isFinite(Number(lock.expiresAt))) return null;
+    if (Number(lock.expiresAt) <= Date.now()) {
+      localStorage.removeItem(GPS_DISCONNECT_LOCK_KEY);
+      return null;
+    }
+    return lock;
+  } catch (_) {
+    return null;
+  }
+}
+
+function isGpsDisconnectLocked() {
+  return !!readGpsDisconnectLock();
+}
+
+function formatLockDuration(milliseconds) {
+  const totalSeconds = Math.max(0, Math.ceil(milliseconds / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function refreshGpsDisconnectLockUi() {
+  const status = document.getElementById("gpsDisconnectLockStatus");
+  const button = document.getElementById("disconnectGpsButton");
+  const lock = readGpsDisconnectLock();
+  if (lock) {
+    const remaining = formatLockDuration(Number(lock.expiresAt) - Date.now());
+    if (status) {
+      status.classList.add("gps-lock-active");
+      status.textContent = `GPS DISCONNECT LOCKED · ${remaining} remaining · Started ${new Date(lock.startedAt).toLocaleTimeString()}`;
+    }
+    if (button) {
+      button.classList.add("gps-disconnect-locked");
+      button.setAttribute("aria-disabled", "true");
+      button.textContent = `GPS LOCKED — ${remaining}`;
+    }
+  } else {
+    if (status) {
+      status.classList.remove("gps-lock-active");
+      status.textContent = `Disconnect lock begins with the first valid GPS fix and lasts ${GPS_DISCONNECT_LOCK_HOURS} hours.`;
+    }
+    if (button) {
+      button.classList.remove("gps-disconnect-locked");
+      button.removeAttribute("aria-disabled");
+      button.textContent = "Disconnect External GPS";
+    }
+  }
+}
+
+function startGpsDisconnectLock(locationData = null) {
+  const existing = readGpsDisconnectLock();
+  if (existing || !currentUnitId || userMode === "dispatch") {
+    refreshGpsDisconnectLockUi();
+    return existing;
+  }
+  const startedAt = Date.now();
+  const lock = {
+    unitId: currentUnitId,
+    deviceId: clientInstallId,
+    startedAt,
+    expiresAt: startedAt + GPS_DISCONNECT_LOCK_MS
+  };
+  localStorage.setItem(GPS_DISCONNECT_LOCK_KEY, JSON.stringify(lock));
+  refreshGpsDisconnectLockUi();
+  writeAuditEvent("gps_disconnect_lock_started", `GPS manual-disconnect lock started for ${GPS_DISCONNECT_LOCK_HOURS} hours`, {
+    source: "automatic",
+    severity: "info",
+    includeLocation: true,
+    locationData
+  });
+  publishPresence();
+  return lock;
+}
+
+function clearGpsDisconnectLock() {
+  localStorage.removeItem(GPS_DISCONNECT_LOCK_KEY);
+  refreshGpsDisconnectLockUi();
+}
+
+function denyGpsDisconnect(lock) {
+  const remaining = formatLockDuration(Number(lock.expiresAt) - Date.now());
+  setStatus(`GPS disconnect denied — ${remaining} remains in the shift lock`, "bad");
+  addDiagnosticEvent(`Manual GPS disconnect denied with ${remaining} remaining`);
+  writeAuditEvent("gps_disconnect_denied_during_lock", `Manual GPS disconnect denied; ${remaining} remained in the ${GPS_DISCONNECT_LOCK_HOURS}-hour shift lock`, {
+    source: "user",
+    severity: "warning",
+    buttonLabel: "Disconnect External GPS",
+    reason: "Active shift GPS lock",
+    includeLocation: true,
+    lookupStoredLocation: true
+  });
+  alert(`GPS DISCONNECT LOCKED\n\nThis GPS feed cannot be manually disconnected for another ${remaining}.\n\nUse Planned Shutdown / Close AVL if the computer must be restarted or serviced.`);
+}
+
+function resumeGpsForActiveLock() {
+  refreshGpsDisconnectLockUi();
+  if (!currentUnitId || userMode === "dispatch" || closureExplanationRequired || !readGpsDisconnectLock()) return;
+  if (serialPort || serialConnectionAttemptInProgress) return;
+  if (localStorage.getItem("avl_hasAuthorizedGps") !== "true" && !localStorage.getItem("avl_lastGpsSignature")) return;
+  serialAutoMode = true;
+  setTimeout(() => {
+    if (currentUnitId && userMode !== "dispatch" && readGpsDisconnectLock() && !serialPort) connectSerialGPS(true);
+  }, 750);
+}
+
+if (gpsDisconnectLockTimer) clearInterval(gpsDisconnectLockTimer);
+gpsDisconnectLockTimer = setInterval(refreshGpsDisconnectLockUi, 1000);
+refreshGpsDisconnectLockUi();
+
+//////////////////////////////////////////////////////
+// PLANNED CLOSURE REASONS / UNEXPLAINED CLOSES
+//////////////////////////////////////////////////////
+
+function restoreUnclosedSessionMarker() {
+  try {
+    const marker = JSON.parse(localStorage.getItem("avl_openSessionMarker") || "null");
+    return marker && marker.unitId && marker.openedAt ? marker : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function isPlannedClosureAuthorized() {
+  return Number(localStorage.getItem(PLANNED_CLOSURE_UNTIL_KEY) || 0) > Date.now();
+}
+
+function beginSessionClosureTracking() {
+  if (!currentUnitId || userMode === "dispatch") return;
+  const previous = pendingPreviousClosureMarker;
+  const marker = {
+    unitId: currentUnitId,
+    deviceId: clientInstallId,
+    sessionId: clientSessionId,
+    openedAt: Date.now(),
+    loginTime: sessionLoginTime || Date.now()
+  };
+  localStorage.setItem(OPEN_SESSION_MARKER_KEY, JSON.stringify(marker));
+  localStorage.removeItem(PLANNED_CLOSURE_UNTIL_KEY);
+  if (previous) {
+    closureExplanationRequired = true;
+    setTimeout(() => showClosureReasonModal("retrospective", previous), 100);
+  } else {
+    closureExplanationRequired = false;
+    resumeGpsForActiveLock();
+  }
+}
+
+function markSessionClosureCompleted() {
+  localStorage.removeItem(OPEN_SESSION_MARKER_KEY);
+  localStorage.setItem(PLANNED_CLOSURE_UNTIL_KEY, String(Date.now() + (5 * 60 * 1000)));
+  pendingPreviousClosureMarker = null;
+  closureExplanationRequired = false;
+}
+
+function getClosureReasonLabel(value) {
+  const labels = {
+    windows_update: "Windows update / required restart",
+    end_shift: "End of shift",
+    maintenance: "Vehicle or computer maintenance",
+    equipment_problem: "Equipment or GPS problem",
+    browser_crash: "Browser crash or accidental closure",
+    power_loss: "Power loss or forced shutdown",
+    emergency: "Emergency circumstances",
+    supervisor_directed: "Supervisor-directed shutdown",
+    other: "Other"
+  };
+  return labels[value] || "";
+}
+
+function showClosureReasonModal(mode = "planned", context = null) {
+  if (!currentUnitId || userMode === "dispatch") return;
+  closureModalMode = mode;
+  closureModalContext = context;
+  const modal = document.getElementById("closureReasonModal");
+  const title = document.getElementById("closureReasonTitle");
+  const prompt = document.getElementById("closureReasonPrompt");
+  const select = document.getElementById("closureReasonSelect");
+  const notes = document.getElementById("closureReasonNotes");
+  const cancel = document.getElementById("closureReasonCancel");
+  const error = document.getElementById("closureReasonError");
+  if (!modal) return;
+  if (select) select.value = "";
+  if (notes) notes.value = "";
+  if (error) error.textContent = "";
+  if (mode === "retrospective") {
+    if (title) title.textContent = "Previous AVL Closure Requires Explanation";
+    if (prompt) prompt.textContent = `The previous session for ${context?.unitId || currentUnitId} ended without a planned-closure reason. Enter the reason before GPS controls can be used.`;
+    if (cancel) cancel.classList.add("mode-hidden");
+  } else {
+    if (title) title.textContent = "Planned Shutdown / Close AVL";
+    const lock = readGpsDisconnectLock();
+    const lockText = lock ? ` The GPS shift lock still has ${formatLockDuration(lock.expiresAt - Date.now())} remaining.` : "";
+    if (prompt) prompt.textContent = `Choose why AVL and the GPS feed must be stopped.${lockText} The reason and last known location will be recorded before shutdown.`;
+    if (cancel) cancel.classList.remove("mode-hidden");
+  }
+  modal.classList.remove("mode-hidden");
+  select?.focus();
+}
+
+function cancelClosureReasonModal() {
+  if (closureModalMode === "retrospective") return;
+  document.getElementById("closureReasonModal")?.classList.add("mode-hidden");
+  closureModalMode = null;
+  closureModalContext = null;
+}
+
+async function submitClosureReason() {
+  const select = document.getElementById("closureReasonSelect");
+  const notes = document.getElementById("closureReasonNotes");
+  const error = document.getElementById("closureReasonError");
+  const reasonCode = select?.value || "";
+  const reasonLabel = getClosureReasonLabel(reasonCode);
+  const noteText = (notes?.value || "").trim();
+  if (!reasonLabel) {
+    if (error) error.textContent = "Select a closure reason.";
+    return;
+  }
+  if (reasonCode === "other" && !noteText) {
+    if (error) error.textContent = "Enter notes when Other is selected.";
+    return;
+  }
+  if (error) error.textContent = "Saving reason…";
+
+  if (closureModalMode === "retrospective") {
+    const previous = closureModalContext || pendingPreviousClosureMarker || {};
+    await writeAuditEvent("previous_unexplained_closure_reason_supplied", `Reason supplied for prior unexplained AVL closure: ${reasonLabel}`, {
+      source: "user",
+      severity: "action",
+      recordUnitId: previous.unitId || currentUnitId,
+      targetUnit: previous.unitId || currentUnitId,
+      reason: reasonLabel,
+      closureReason: reasonLabel,
+      closureNotes: noteText,
+      includeLocation: true,
+      locationUnitId: previous.unitId || currentUnitId,
+      lookupStoredLocation: true
+    });
+    pendingPreviousClosureMarker = null;
+    closureExplanationRequired = false;
+    closureModalMode = null;
+    closureModalContext = null;
+    document.getElementById("closureReasonModal")?.classList.add("mode-hidden");
+    resumeGpsForActiveLock();
+    setStatus("Previous closure reason recorded", "good");
+    return;
+  }
+
+  await writeAuditEvent("planned_session_closure", `Planned AVL shutdown recorded: ${reasonLabel}`, {
+    source: "user",
+    severity: "action",
+    reason: reasonLabel,
+    closureReason: reasonLabel,
+    closureNotes: noteText,
+    includeLocation: true,
+    lookupStoredLocation: true
+  });
+  markSessionClosureCompleted();
+  closureModalMode = null;
+  closureModalContext = null;
+  document.getElementById("closureReasonModal")?.classList.add("mode-hidden");
+  await finishPlannedUnitClosure(reasonLabel);
+}
+
+async function finishPlannedUnitClosure(reasonLabel) {
+  const id = currentUnitId;
+  stopAuditTrail();
+  stopDispatchIdleMonitor();
+  stopWatchingOwnDispatchSession();
+  if (browserWatchId !== null) {
+    navigator.geolocation.clearWatch(browserWatchId);
+    browserWatchId = null;
+  }
+  await disconnectSerialGPS(true, { bypassLock: true, endSession: true, reason: reasonLabel });
+  await stopPresence(true);
+  if (id) await unitsRef.child(id).remove().catch(() => {});
+  if (id && markers[id]) {
+    map.removeLayer(markers[id]);
+    delete markers[id];
+  }
+  clearGpsDisconnectLock();
+  clearSavedLogin();
+  currentUnitId = null;
+  currentSessionKey = null;
+  userMode = null;
+  userRole = "user";
+  selectedRosterUnitId = null;
+  selectedRosterMode = null;
+  document.getElementById("unitId").value = "";
+  document.getElementById("loginScreen").style.display = "flex";
+  applyModeUi();
+  setStatus(`AVL safely stopped — ${reasonLabel}`, "warn");
+  setFixDetails("Closure reason saved. It is now safe to close the page or restart Windows.");
+  alert(`Closure reason logged: ${reasonLabel}\n\nAVL and the GPS feed are stopped. It is now safe to close the page or restart Windows.`);
+}
+
+window.addEventListener("beforeunload", (event) => {
+  if (!currentUnitId || userMode === "dispatch" || isPlannedClosureAuthorized()) return;
+  if (!localStorage.getItem(OPEN_SESSION_MARKER_KEY)) return;
+  event.preventDefault();
+  event.returnValue = "";
 });
 
 //////////////////////////////////////////////////////
@@ -750,6 +1360,7 @@ function getSessionDiagnostics(session) {
   const heartbeatFresh = lastSeen && (Date.now() - lastSeen) <= SESSION_STALE_MS;
   const reportedFirebase = session.firebaseConnected === false ? "DISCONNECTED" : "CONNECTED";
   const effectiveFirebase = heartbeatFresh ? "CONNECTED — heartbeat confirmed" : reportedFirebase;
+  const remoteLockRemaining = Number(session.gpsDisconnectLockExpiresAt || 0) - Date.now();
 
   return [
     `Device ID: ${session.deviceId || "Unknown / legacy client"}`,
@@ -783,7 +1394,9 @@ function getSessionDiagnostics(session) {
       ? (lastGps ? "Valid position (quality not reported)" : "Not reported")
       : formatFixQuality(session.fixQuality)}`,
     `Satellites: ${session.satellites ?? "Unknown"}`,
-    `HDOP: ${session.hdop ?? "Unknown"}`
+    `HDOP: ${session.hdop ?? "Unknown"}`,
+    `GPS disconnect lock: ${remoteLockRemaining > 0 ? `LOCKED — ${formatLockDuration(remoteLockRemaining)} remaining` : "Not active"}`,
+    `Closure explanation required: ${session.closureExplanationRequired ? "YES" : "NO"}`
   ].join("\n");
 }
 
@@ -869,6 +1482,7 @@ function applyModeUi() {
   if (userMode === "dispatch") {
     setFixDetails("Dispatch view only. GPS controls are hidden.");
   }
+  refreshGpsDisconnectLockUi();
 }
 
 function startPresenceHeartbeat() {
@@ -912,6 +1526,7 @@ function armUnexpectedDisconnectAudit() {
   const record = {
     timestamp: firebase.database.ServerValue.TIMESTAMP,
     clientTime: Date.now(),
+    eventTime: Date.now(),
     unitId: currentUnitId,
     actorName: currentUnitId,
     actorType: "SYSTEM",
@@ -919,9 +1534,11 @@ function armUnexpectedDisconnectAudit() {
     role: userRole || "user",
     severity: "warning",
     eventType: "session_connection_ended_unexpectedly",
-    description: "Unit session/Firebase connection ended unexpectedly",
+    description: "Unit session/Firebase connection ended unexpectedly without a planned-closure reason",
     source: "system",
     reason: "Possible coverage loss, browser close, sleep, crash, or power loss",
+    closureReason: "Not provided before disconnect",
+    closureNotes: "",
     deviceId: clientInstallId,
     sessionId: clientSessionId,
     appVersion: APP_VERSION,
@@ -1050,7 +1667,11 @@ function publishPresence() {
     lastNmeaTime: lastNmeaPacketTime || 0,
     fixQuality: serialFixQuality,
     satellites: serialSatellites,
-    hdop: serialHdop
+    hdop: serialHdop,
+    gpsDisconnectLocked: isGpsDisconnectLocked(),
+    gpsDisconnectLockStartedAt: readGpsDisconnectLock()?.startedAt || 0,
+    gpsDisconnectLockExpiresAt: readGpsDisconnectLock()?.expiresAt || 0,
+    closureExplanationRequired: !!closureExplanationRequired
   };
 
   sessionsRef.child(currentSessionKey).set(presencePayload).then(() => {
@@ -1134,6 +1755,8 @@ function forceBackToLogin(message) {
   }
 
   stopWatchingOwnDispatchSession();
+  markSessionClosureCompleted();
+  clearGpsDisconnectLock();
   clearSavedLogin();
 
   currentUnitId = null;
@@ -1211,6 +1834,7 @@ function restoreLogin() {
   startPresenceHeartbeat();
   watchOwnDispatchSession();
   startDispatchIdleMonitor();
+  beginSessionClosureTracking();
   setStatus(`Session restored for ${savedId}`, "good");
   addDiagnosticEvent(`Session restored: ${savedId} (${userMode})`);
   writeAuditEvent("session_restored", `Session restored for ${savedId} (${userMode})`, {
@@ -1290,6 +1914,7 @@ function login() {
   startPresenceHeartbeat();
   watchOwnDispatchSession();
   startDispatchIdleMonitor();
+  beginSessionClosureTracking();
   setStatus(`Logged in as ${id} (${mode}${userRole === "admin" ? ", admin" : ""})`, "good");
   addDiagnosticEvent(`Login: ${id} (${mode}${userRole === "admin" ? ", admin" : ""})`);
   writeAuditEvent("login", `Logged in as ${id} (${mode}${userRole === "admin" ? ", admin" : ""})`, {
@@ -1301,12 +1926,17 @@ function login() {
 }
 
 async function logout() {
+  if (userMode !== "dispatch" && userRole !== "admin" && readGpsDisconnectLock() && !isPlannedClosureAuthorized()) {
+    showClosureReasonModal("planned");
+    return;
+  }
   await writeAuditEvent("logout", "Logout requested", {
     source: "user",
     severity: "action",
     includeLocation: userMode !== "dispatch",
     lookupStoredLocation: true
   });
+  markSessionClosureCompleted();
   stopAuditTrail();
   stopDispatchIdleMonitor();
   stopWatchingOwnDispatchSession();
@@ -1316,7 +1946,7 @@ async function logout() {
     browserWatchId = null;
   }
 
-  await disconnectSerialGPS();
+  await disconnectSerialGPS(true, { bypassLock: true, endSession: true, reason: "Explicit logout" });
   await stopPresence(true);
 
   if (currentUnitId && userMode !== "dispatch") {
@@ -1340,6 +1970,7 @@ async function logout() {
   localStorage.removeItem("avl_sessionLoginTime");
   localStorage.removeItem("avl_role");
   localStorage.removeItem("avl_temp_access");
+  clearGpsDisconnectLock();
 
   document.getElementById("unitId").value = "";
   document.getElementById("loginScreen").style.display = "flex";
@@ -1657,6 +2288,7 @@ function updateDeveloperInfo() {
   const lastWrite = lastSuccessfulWriteTime
     ? formatLastUpdateAge(lastSuccessfulWriteTime)
     : "No confirmed write yet";
+  const localGpsLock = readGpsDisconnectLock();
 
   const selectedSession = getSelectedRosterSession();
   const selectedTitle = selectedRosterUnitId
@@ -1689,6 +2321,8 @@ function updateDeveloperInfo() {
     `Fix: ${formatFixQuality(serialFixQuality)}`,
     `Satellites: ${serialSatellites ?? "Unknown"}`,
     `HDOP: ${serialHdop ?? "Unknown"}`,
+    `GPS disconnect lock: ${localGpsLock ? `LOCKED — ${formatLockDuration(localGpsLock.expiresAt - Date.now())} remaining` : "Not active"}`,
+    `Closure explanation required: ${closureExplanationRequired ? "YES" : "NO"}`,
     `Wake lock: ${wakeLock ? "ACTIVE" : "INACTIVE"}`,
     "",
     `SELECTED: ${selectedTitle}`,
@@ -1886,6 +2520,10 @@ async function grantSerialGPSPermission() {
 
 async function connectSerialGPS(isRetry = false) {
   if (userMode === "dispatch") return alert("Dispatch view is view-only. GPS controls are disabled.");
+  if (closureExplanationRequired) {
+    showClosureReasonModal("retrospective", pendingPreviousClosureMarker);
+    return;
+  }
   const id = document.getElementById("unitId").value.trim();
   if (!id) return alert("Enter Unit ID first");
 
@@ -2156,7 +2794,28 @@ async function probePortForNmea(port, baudRate, probeMs, attemptGeneration) {
 // DISCONNECT SERIAL GPS
 //////////////////////////////////////////////////////
 
-async function disconnectSerialGPS(manual = true) {
+async function disconnectSerialGPS(manual = true, options = {}) {
+  const activeLock = manual ? readGpsDisconnectLock() : null;
+  let adminOverride = false;
+  if (manual && activeLock && !options.bypassLock) {
+    if (userRole !== "admin") {
+      denyGpsDisconnect(activeLock);
+      return false;
+    }
+    const remaining = formatLockDuration(Number(activeLock.expiresAt) - Date.now());
+    if (!confirm(`ADMIN OVERRIDE\n\nThe GPS disconnect lock has ${remaining} remaining. Disconnect anyway?`)) return false;
+    adminOverride = true;
+    await writeAuditEvent("gps_disconnect_lock_admin_override", `Administrator overrode GPS disconnect lock with ${remaining} remaining`, {
+      source: "admin",
+      severity: "action",
+      buttonLabel: "Disconnect External GPS",
+      reason: options.reason || "Administrator override",
+      includeLocation: true,
+      lookupStoredLocation: true
+    });
+    clearGpsDisconnectLock();
+  }
+
   if (manual) {
     serialAutoMode = false;
     serialConnectGeneration += 1;
@@ -2202,13 +2861,25 @@ async function disconnectSerialGPS(manual = true) {
       lastNmeaSentenceType = "None";
       setStatus("External GPS disconnected", "warn");
       addDiagnosticEvent("External GPS disconnected");
-      writeAuditEvent("serial_manual_disconnect", "Manual Disconnect External GPS requested", { source: "user", severity: "action", buttonLabel: "Disconnect External GPS" });
+      const endingSession = !!options.endSession;
+      writeAuditEvent(
+        endingSession ? "serial_disconnected_for_session_end" : "serial_manual_disconnect",
+        endingSession ? `External GPS stopped as part of session closure${options.reason ? `: ${options.reason}` : ""}` : "Manual Disconnect External GPS requested",
+        {
+          source: adminOverride ? "admin" : "user",
+          severity: "action",
+          buttonLabel: endingSession ? "Session closure" : "Disconnect External GPS",
+          reason: options.reason || ""
+        }
+      );
     }
     renderReceiverHealth();
+    return true;
 
   } catch (err) {
     console.error(err);
     setStatus("Disconnect error: " + err.message, "bad");
+    return false;
   }
 }
 
@@ -2524,6 +3195,7 @@ function publishFix(data) {
 
   if (data.gpsSource?.startsWith("serial") && !serialFixLoggedForConnection) {
     serialFixLoggedForConnection = true;
+    startGpsDisconnectLock(data);
     const manualStart = pendingManualGpsStart;
     const secondsToFix = manualStart?.requestedAt
       ? Math.max(0, Math.round((Date.now() - manualStart.requestedAt) / 1000))
@@ -3078,6 +3750,10 @@ sessionsRef.on("value", (snap) => {
 
 function startBrowserGPS() {
   if (userMode === "dispatch") return alert("Dispatch view is view-only. GPS controls are disabled.");
+  if (closureExplanationRequired) {
+    showClosureReasonModal("retrospective", pendingPreviousClosureMarker);
+    return;
+  }
   const id = document.getElementById("unitId").value.trim();
   if (!id) return alert("Enter Unit ID first");
 
@@ -3139,6 +3815,10 @@ function startBrowserGPS() {
 async function logOffUnit() {
   const id = currentUnitId || document.getElementById("unitId").value.trim();
   if (!id) return alert("Enter Unit ID first");
+  if (userRole !== "admin" && readGpsDisconnectLock() && !isPlannedClosureAuthorized()) {
+    showClosureReasonModal("planned");
+    return;
+  }
 
   await writeAuditEvent("unit_logoff", "Unit logged off and ended its AVL session", {
     source: "user",
@@ -3147,15 +3827,17 @@ async function logOffUnit() {
     locationUnitId: id,
     lookupStoredLocation: true
   });
+  markSessionClosureCompleted();
 
   if (browserWatchId !== null) {
     navigator.geolocation.clearWatch(browserWatchId);
     browserWatchId = null;
   }
 
-  await disconnectSerialGPS();
+  await disconnectSerialGPS(true, { bypassLock: true, endSession: true, reason: "Unit logoff" });
   await stopPresence(true);
   await unitsRef.child(id).remove();
+  clearGpsDisconnectLock();
 
   if (markers[id]) {
     map.removeLayer(markers[id]);
@@ -3204,7 +3886,11 @@ async function forceRemoveUnit() {
       browserWatchId = null;
     }
 
-    if (id === currentUnitId) await disconnectSerialGPS();
+    if (id === currentUnitId) {
+      markSessionClosureCompleted();
+      await disconnectSerialGPS(true, { bypassLock: true, endSession: true, reason: "Administrator removal" });
+      clearGpsDisconnectLock();
+    }
 
     await sessionsRef.child(getSessionKey("unit", id)).remove().catch(() => {});
     await unitsRef.child(id).remove();

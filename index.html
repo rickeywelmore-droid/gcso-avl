@@ -10,7 +10,7 @@
   <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-database-compat.js"></script>
 
-  <link rel="stylesheet" href="styles.css"/>
+  <link rel="stylesheet" href="styles.css?v=1.1.12"/>
 
 </head>
 
@@ -55,7 +55,8 @@
 
       <button onclick="connectSerialGPS()">Auto Detect External GPS</button>
       <button onclick="grantSerialGPSPermission()">Grant GPS Permission / Add Receiver</button>
-      <button onclick="disconnectSerialGPS()">Disconnect External GPS</button>
+      <button id="disconnectGpsButton" onclick="disconnectSerialGPS()">Disconnect External GPS</button>
+      <div id="gpsDisconnectLockStatus" class="gps-lock-status" aria-live="polite">Disconnect lock begins with the first valid GPS fix and lasts 10 hours.</div>
       <button onclick="startBrowserGPS()">Start Browser GPS Fallback</button>
       <button onclick="centerOnUnit()">Center On My Unit</button>
 
@@ -66,6 +67,7 @@
 
       <hr>
 
+      <button class="planned-closure-button" onclick="showClosureReasonModal('planned')">Planned Shutdown / Close AVL</button>
       <button onclick="logOffUnit()">Log Off My Unit</button>
     </div>
 
@@ -86,7 +88,7 @@
     <div id="gpsStatus">GPS: Disconnected</div>
     <div id="fixDetails">Fix details will appear here.</div>
 
-    <div class="app-version">GCSO AVL v1.1.11 · Build 2026-08-24</div>
+    <div class="app-version">GCSO AVL v1.1.12 · Build 2026-08-28</div>
 
     <div id="developerPanel" class="admin-only mode-hidden">
       <div class="section-title">DEVELOPER PANEL</div>
@@ -94,7 +96,17 @@
       <div id="developerInfo">Diagnostics loading...</div>
       <div id="rawNmea">Raw NMEA will appear here.</div>
       <hr>
-      <div class="section-title">FIVE-DAY AUDIT TRAIL</div>
+      <div class="section-title">ONE-YEAR AUDIT TRAIL</div>
+      <div class="audit-range-controls">
+        <label for="auditStartDate">Start date</label>
+        <input id="auditStartDate" type="date">
+        <label for="auditEndDate">End date</label>
+        <input id="auditEndDate" type="date">
+        <button onclick="loadAuditTrail()">Load Date Range</button>
+        <button onclick="setDefaultAuditRange(true); loadAuditTrail();">Last 7 Days</button>
+      </div>
+      <div id="auditRangeStatus" class="audit-range-status">Select up to 31 days at a time.</div>
+      <div id="auditStorageStatus" class="audit-storage-status">Calculating audit storage estimate…</div>
       <div class="audit-filters">
         <label for="auditUnitFilter">Unit / user</label>
         <select id="auditUnitFilter" onchange="filterAuditTrail()">
@@ -117,6 +129,17 @@
         </select>
       </div>
       <div id="auditTrailList" class="audit-list">Audit events loading...</div>
+      <div class="audit-pagination">
+        <button id="auditPreviousPage" onclick="changeAuditPage(-1)">Previous</button>
+        <span id="auditPageLabel">Page 1 of 1</span>
+        <button id="auditNextPage" onclick="changeAuditPage(1)">Next</button>
+      </div>
+      <div class="audit-export-controls">
+        <label for="auditExportMonth">Monthly archive</label>
+        <input id="auditExportMonth" type="month">
+        <button onclick="exportAuditMonth('json')">Export Month JSON</button>
+        <button onclick="exportAuditMonth('csv')">Export Month CSV</button>
+      </div>
     </div>
   </div>
 
@@ -137,6 +160,33 @@
   </div>
 </div>
 
-<script src="app.js?v=1.1.11"></script>
+<div id="closureReasonModal" class="idle-modal mode-hidden" role="dialog" aria-modal="true" aria-labelledby="closureReasonTitle">
+  <div class="idle-modal-card closure-reason-card">
+    <div id="closureReasonTitle" class="idle-modal-title">Planned Shutdown / Close AVL</div>
+    <p id="closureReasonPrompt">Choose why AVL must be stopped.</p>
+    <label for="closureReasonSelect">Required reason</label>
+    <select id="closureReasonSelect">
+      <option value="">Select a reason…</option>
+      <option value="windows_update">Windows update / required restart</option>
+      <option value="end_shift">End of shift</option>
+      <option value="maintenance">Vehicle or computer maintenance</option>
+      <option value="equipment_problem">Equipment or GPS problem</option>
+      <option value="browser_crash">Browser crash or accidental closure</option>
+      <option value="power_loss">Power loss or forced shutdown</option>
+      <option value="emergency">Emergency circumstances</option>
+      <option value="supervisor_directed">Supervisor-directed shutdown</option>
+      <option value="other">Other</option>
+    </select>
+    <label for="closureReasonNotes">Notes</label>
+    <textarea id="closureReasonNotes" rows="4" maxlength="500" placeholder="Required when Other is selected; optional otherwise."></textarea>
+    <div id="closureReasonError" class="closure-reason-error" aria-live="polite"></div>
+    <div class="idle-modal-actions">
+      <button id="closureReasonCancel" onclick="cancelClosureReasonModal()">Cancel</button>
+      <button onclick="submitClosureReason()">Save Reason and Continue</button>
+    </div>
+  </div>
+</div>
+
+<script src="app.js?v=1.1.12"></script>
 </body>
 </html>

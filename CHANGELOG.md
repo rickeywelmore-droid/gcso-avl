@@ -1,5 +1,21 @@
 # GCSO AVL Changelog
 
+## 1.1.12 — One-Year Audit + Shift GPS Lock (2026-08-28)
+- Extended audit retention from five days to 365 days.
+- Replaced whole-database audit loading with timestamp-indexed date queries limited to 31 days at a time.
+- Added a seven-day default view, unit/severity/source filters, and 100-event pagination.
+- Added monthly JSON and CSV audit exports.
+- Added a lightweight audit-storage estimate with a warning at approximately 750 MB of the 1 GB database allowance.
+- Added indexed cleanup of events older than one year without downloading the full audit tree.
+- Added a persistent ten-hour manual GPS-disconnect lock beginning with the receiver's first valid fix.
+- Lock countdown survives refresh, hot-undocking, and redocking; active locks trigger automatic receiver recovery after reopening AVL.
+- Manual disconnect attempts during the lock are denied and audited; administrators retain a confirmed, audited override.
+- Logout or unit logoff during an active lock routes ordinary users through the planned-closure reason workflow.
+- Added required planned-closure reasons, including Windows update/restart, end of shift, maintenance, equipment problem, emergency, and free-text Other.
+- Added a browser leave warning for unexplained window closure.
+- A computer that returns after an unexplained closure must supply a retrospective reason before GPS controls resume.
+- Updated Firebase rules add timestamp indexes, protect audit events from modification or early deletion, and enable audit metrics.
+
 ## 1.1.11 — Hot-Undock GPS Recovery (2026-08-24)
 - Added Web Serial device-removal and device-return handling for FZ-55 hot-undocking and redocking.
 - Cleanly invalidates stale reader/port objects so an old read loop cannot close a newly re-enumerated receiver.
