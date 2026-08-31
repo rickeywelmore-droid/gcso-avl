@@ -45,19 +45,11 @@
     <div id="unitGpsControls">
       <hr>
 
-      <label>Baud Rate</label>
-      <select id="baudRate">
-        <option value="4800">4800</option>
-        <option value="9600" selected>9600</option>
-        <option value="38400">38400</option>
-        <option value="115200">115200</option>
-      </select>
-
-      <button onclick="connectSerialGPS()">Auto Detect External GPS</button>
-      <button onclick="grantSerialGPSPermission()">Grant GPS Permission / Add Receiver</button>
-      <button id="disconnectGpsButton" onclick="disconnectSerialGPS()">Disconnect External GPS</button>
-      <div id="gpsDisconnectLockStatus" class="gps-lock-status" aria-live="polite">Disconnect lock begins with the first valid GPS fix and lasts 10 hours.</div>
-      <button onclick="startBrowserGPS()">Start Browser GPS Fallback</button>
+      <div class="section-title">GPS CONTROLS</div>
+      <button id="startGpsButton" onclick="connectSerialGPS()">Start GPS</button>
+      <button id="stopGpsButton" onclick="disconnectSerialGPS()">Stop GPS</button>
+      <button id="selectReceiverButton" onclick="selectSerialGPSReceiver()">Select Receiver</button>
+      <div id="selectedReceiverStatus" class="gps-lock-status" aria-live="polite">No preferred receiver selected.</div>
       <button onclick="centerOnUnit()">Center On My Unit</button>
 
       <div id="receiverHealth" class="receiver-health" aria-live="polite">
@@ -88,7 +80,7 @@
     <div id="gpsStatus">GPS: Disconnected</div>
     <div id="fixDetails">Fix details will appear here.</div>
 
-    <div class="app-version">GCSO AVL v1.1.13 · Build 2026-08-28</div>
+    <div class="app-version">GCSO AVL v1.1.14 · Build 2026-08-31</div>
 
     <div id="developerPanel" class="admin-only mode-hidden">
       <div class="section-title">DEVELOPER PANEL</div>
@@ -187,6 +179,6 @@
   </div>
 </div>
 
-<script src="app.js?v=1.1.13"></script>
+<script src="app.js?v=1.1.14"></script>
 </body>
 </html>
