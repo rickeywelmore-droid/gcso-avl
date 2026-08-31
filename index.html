@@ -40,7 +40,8 @@
     <div id="networkStatus" class="network-banner">NETWORK: CHECKING...</div>
     <button onclick="toggleDarkMode()">Toggle Dark Mode</button>
 
-    <input id="unitId" placeholder="Unit ID / Dispatch Name" />
+    <input id="unitId" type="hidden" />
+    <div id="activeIdentity" class="admin-selected" aria-live="polite">Not logged in</div>
 
     <div id="unitGpsControls">
       <hr>
@@ -50,20 +51,14 @@
       <button id="stopGpsButton" onclick="disconnectSerialGPS()">Stop GPS</button>
       <button id="selectReceiverButton" onclick="selectSerialGPSReceiver()">Select Receiver</button>
       <div id="selectedReceiverStatus" class="gps-lock-status" aria-live="polite">No preferred receiver selected.</div>
-      <button onclick="centerOnUnit()">Center On My Unit</button>
 
       <div id="receiverHealth" class="receiver-health" aria-live="polite">
         <div class="receiver-health-title">EXTERNAL GPS HEALTH</div>
         <div id="receiverHealthDetails">Receiver not connected.</div>
       </div>
-
-      <hr>
-
-      <button class="planned-closure-button" onclick="showClosureReasonModal('planned')">Planned Shutdown / Close AVL</button>
-      <button onclick="logOffUnit()">Log Off My Unit</button>
     </div>
 
-    <button onclick="logout()">Logout</button>
+    <button id="logoutButton" class="mode-hidden" onclick="logout()">Logout</button>
 
     <div id="adminControls" class="admin-only mode-hidden">
       <hr>
@@ -80,7 +75,7 @@
     <div id="gpsStatus">GPS: Disconnected</div>
     <div id="fixDetails">Fix details will appear here.</div>
 
-    <div class="app-version">GCSO AVL v1.1.14 · Build 2026-08-31</div>
+    <div class="app-version">GCSO AVL v1.1.15 · Build 2026-08-31</div>
 
     <div id="developerPanel" class="admin-only mode-hidden">
       <div class="section-title">DEVELOPER PANEL</div>
@@ -152,33 +147,6 @@
   </div>
 </div>
 
-<div id="closureReasonModal" class="idle-modal mode-hidden" role="dialog" aria-modal="true" aria-labelledby="closureReasonTitle">
-  <div class="idle-modal-card closure-reason-card">
-    <div id="closureReasonTitle" class="idle-modal-title">Planned Shutdown / Close AVL</div>
-    <p id="closureReasonPrompt">Choose why AVL must be stopped.</p>
-    <label for="closureReasonSelect">Required reason</label>
-    <select id="closureReasonSelect">
-      <option value="">Select a reason…</option>
-      <option value="windows_update">Windows update / required restart</option>
-      <option value="end_shift">End of shift</option>
-      <option value="maintenance">Vehicle or computer maintenance</option>
-      <option value="equipment_problem">Equipment or GPS problem</option>
-      <option value="browser_crash">Browser crash or accidental closure</option>
-      <option value="power_loss">Power loss or forced shutdown</option>
-      <option value="emergency">Emergency circumstances</option>
-      <option value="supervisor_directed">Supervisor-directed shutdown</option>
-      <option value="other">Other</option>
-    </select>
-    <label for="closureReasonNotes">Notes</label>
-    <textarea id="closureReasonNotes" rows="4" maxlength="500" placeholder="Required when Other is selected; optional otherwise."></textarea>
-    <div id="closureReasonError" class="closure-reason-error" aria-live="polite"></div>
-    <div class="idle-modal-actions">
-      <button id="closureReasonCancel" onclick="cancelClosureReasonModal()">Cancel</button>
-      <button onclick="submitClosureReason()">Save Reason and Continue</button>
-    </div>
-  </div>
-</div>
-
-<script src="app.js?v=1.1.14"></script>
+<script src="app.js?v=1.1.15"></script>
 </body>
 </html>

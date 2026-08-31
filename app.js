@@ -20,13 +20,13 @@ const auditMetricsRef = db.ref("auditMetrics");
 /*********************************************************************
  GCSO AVL CONFIGURATION
  --------------------------------------------------------------------
- Version: 1.1.14
+ Version: 1.1.15
  Build: 2026-08-31
 
  Temporary client-side access gate. This is a convenience barrier,
  not strong authentication.
 *********************************************************************/
-const APP_VERSION = "1.1.14";
+const APP_VERSION = "1.1.15";
 const BUILD_DATE = "2026-08-31";
 const USER_PASSWORD = "GCSO123";
 const ADMIN_PASSWORD = "GCSOADMIN123";
@@ -205,10 +205,6 @@ let lastFirebaseRecoveryAttempt = 0;
 let lastValidFixTime = 0;
 let lastFix = null;
 let lastFixUnitId = null;
-let closureModalMode = null;
-let closureModalContext = null;
-let pendingPreviousClosureMarker = restoreUnclosedSessionMarker();
-let closureExplanationRequired = !!pendingPreviousClosureMarker;
 let lastNetworkPublishedFix = null;
 let lastNetworkPublishedUnitId = null;
 let lastNetworkPublishTime = 0;
@@ -838,204 +834,14 @@ document.addEventListener("click", (event) => {
 });
 
 //////////////////////////////////////////////////////
-// SESSION CLOSURE TRACKING
+// RETIRED CONTROL CLEANUP
 //////////////////////////////////////////////////////
 
-const OPEN_SESSION_MARKER_KEY = "avl_openSessionMarker";
-const PLANNED_CLOSURE_UNTIL_KEY = "avl_plannedClosureUntil";
-
-// v1.1.14 removes the shift-length GPS disconnect lock. Clear any lock left
-// behind by an older cached build so Stop GPS works immediately after update.
+// Remove state left by the retired GPS lock and closure-reason workflow. A
+// prior unexplained close must never block GPS controls after this update.
 localStorage.removeItem("avl_gpsDisconnectLock");
-
-//////////////////////////////////////////////////////
-// PLANNED CLOSURE REASONS / UNEXPLAINED CLOSES
-//////////////////////////////////////////////////////
-
-function restoreUnclosedSessionMarker() {
-  try {
-    const marker = JSON.parse(localStorage.getItem("avl_openSessionMarker") || "null");
-    return marker && marker.unitId && marker.openedAt ? marker : null;
-  } catch (_) {
-    return null;
-  }
-}
-
-function isPlannedClosureAuthorized() {
-  return Number(localStorage.getItem(PLANNED_CLOSURE_UNTIL_KEY) || 0) > Date.now();
-}
-
-function beginSessionClosureTracking() {
-  if (!currentUnitId || userMode === "dispatch") return;
-  const previous = pendingPreviousClosureMarker;
-  const marker = {
-    unitId: currentUnitId,
-    deviceId: clientInstallId,
-    sessionId: clientSessionId,
-    openedAt: Date.now(),
-    loginTime: sessionLoginTime || Date.now()
-  };
-  localStorage.setItem(OPEN_SESSION_MARKER_KEY, JSON.stringify(marker));
-  localStorage.removeItem(PLANNED_CLOSURE_UNTIL_KEY);
-  if (previous) {
-    closureExplanationRequired = true;
-    setTimeout(() => showClosureReasonModal("retrospective", previous), 100);
-  } else {
-    closureExplanationRequired = false;
-  }
-}
-
-function markSessionClosureCompleted() {
-  localStorage.removeItem(OPEN_SESSION_MARKER_KEY);
-  localStorage.setItem(PLANNED_CLOSURE_UNTIL_KEY, String(Date.now() + (5 * 60 * 1000)));
-  pendingPreviousClosureMarker = null;
-  closureExplanationRequired = false;
-}
-
-function getClosureReasonLabel(value) {
-  const labels = {
-    windows_update: "Windows update / required restart",
-    end_shift: "End of shift",
-    maintenance: "Vehicle or computer maintenance",
-    equipment_problem: "Equipment or GPS problem",
-    browser_crash: "Browser crash or accidental closure",
-    power_loss: "Power loss or forced shutdown",
-    emergency: "Emergency circumstances",
-    supervisor_directed: "Supervisor-directed shutdown",
-    other: "Other"
-  };
-  return labels[value] || "";
-}
-
-function showClosureReasonModal(mode = "planned", context = null) {
-  if (!currentUnitId || userMode === "dispatch") return;
-  closureModalMode = mode;
-  closureModalContext = context;
-  const modal = document.getElementById("closureReasonModal");
-  const title = document.getElementById("closureReasonTitle");
-  const prompt = document.getElementById("closureReasonPrompt");
-  const select = document.getElementById("closureReasonSelect");
-  const notes = document.getElementById("closureReasonNotes");
-  const cancel = document.getElementById("closureReasonCancel");
-  const error = document.getElementById("closureReasonError");
-  if (!modal) return;
-  if (select) select.value = "";
-  if (notes) notes.value = "";
-  if (error) error.textContent = "";
-  if (mode === "retrospective") {
-    if (title) title.textContent = "Previous AVL Closure Requires Explanation";
-    if (prompt) prompt.textContent = `The previous session for ${context?.unitId || currentUnitId} ended without a planned-closure reason. Enter the reason before GPS controls can be used.`;
-    if (cancel) cancel.classList.add("mode-hidden");
-  } else {
-    if (title) title.textContent = "Planned Shutdown / Close AVL";
-    if (prompt) prompt.textContent = "Choose why AVL and the GPS feed must be stopped. The reason and last known location will be recorded before shutdown.";
-    if (cancel) cancel.classList.remove("mode-hidden");
-  }
-  modal.classList.remove("mode-hidden");
-  select?.focus();
-}
-
-function cancelClosureReasonModal() {
-  if (closureModalMode === "retrospective") return;
-  document.getElementById("closureReasonModal")?.classList.add("mode-hidden");
-  closureModalMode = null;
-  closureModalContext = null;
-}
-
-async function submitClosureReason() {
-  const select = document.getElementById("closureReasonSelect");
-  const notes = document.getElementById("closureReasonNotes");
-  const error = document.getElementById("closureReasonError");
-  const reasonCode = select?.value || "";
-  const reasonLabel = getClosureReasonLabel(reasonCode);
-  const noteText = (notes?.value || "").trim();
-  if (!reasonLabel) {
-    if (error) error.textContent = "Select a closure reason.";
-    return;
-  }
-  if (reasonCode === "other" && !noteText) {
-    if (error) error.textContent = "Enter notes when Other is selected.";
-    return;
-  }
-  if (error) error.textContent = "Saving reason…";
-
-  if (closureModalMode === "retrospective") {
-    const previous = closureModalContext || pendingPreviousClosureMarker || {};
-    await writeAuditEvent("previous_unexplained_closure_reason_supplied", `Reason supplied for prior unexplained AVL closure: ${reasonLabel}`, {
-      source: "user",
-      severity: "action",
-      recordUnitId: previous.unitId || currentUnitId,
-      targetUnit: previous.unitId || currentUnitId,
-      reason: reasonLabel,
-      closureReason: reasonLabel,
-      closureNotes: noteText,
-      includeLocation: true,
-      locationUnitId: previous.unitId || currentUnitId,
-      lookupStoredLocation: true
-    });
-    pendingPreviousClosureMarker = null;
-    closureExplanationRequired = false;
-    closureModalMode = null;
-    closureModalContext = null;
-    document.getElementById("closureReasonModal")?.classList.add("mode-hidden");
-    setStatus("Previous closure reason recorded", "good");
-    return;
-  }
-
-  await writeAuditEvent("planned_session_closure", `Planned AVL shutdown recorded: ${reasonLabel}`, {
-    source: "user",
-    severity: "action",
-    reason: reasonLabel,
-    closureReason: reasonLabel,
-    closureNotes: noteText,
-    includeLocation: true,
-    lookupStoredLocation: true
-  });
-  markSessionClosureCompleted();
-  closureModalMode = null;
-  closureModalContext = null;
-  document.getElementById("closureReasonModal")?.classList.add("mode-hidden");
-  await finishPlannedUnitClosure(reasonLabel);
-}
-
-async function finishPlannedUnitClosure(reasonLabel) {
-  const id = currentUnitId;
-  stopAuditTrail();
-  stopDispatchIdleMonitor();
-  stopWatchingOwnDispatchSession();
-  if (browserWatchId !== null) {
-    navigator.geolocation.clearWatch(browserWatchId);
-    browserWatchId = null;
-  }
-  await disconnectSerialGPS(true, { bypassLock: true, endSession: true, reason: reasonLabel });
-  await stopLiveUnitPublishing(id);
-  await stopPresence(true);
-  if (id) await unitsRef.child(id).remove().catch(() => {});
-  if (id && markers[id]) {
-    map.removeLayer(markers[id]);
-    delete markers[id];
-  }
-  clearSavedLogin();
-  currentUnitId = null;
-  currentSessionKey = null;
-  userMode = null;
-  userRole = "user";
-  selectedRosterUnitId = null;
-  selectedRosterMode = null;
-  document.getElementById("unitId").value = "";
-  document.getElementById("loginScreen").style.display = "flex";
-  applyModeUi();
-  setStatus(`AVL safely stopped — ${reasonLabel}`, "warn");
-  setFixDetails("Closure reason saved. It is now safe to close the page or restart Windows.");
-  alert(`Closure reason logged: ${reasonLabel}\n\nAVL and the GPS feed are stopped. It is now safe to close the page or restart Windows.`);
-}
-
-window.addEventListener("beforeunload", (event) => {
-  if (!currentUnitId || userMode === "dispatch" || isPlannedClosureAuthorized()) return;
-  if (!localStorage.getItem(OPEN_SESSION_MARKER_KEY)) return;
-  event.preventDefault();
-  event.returnValue = "";
-});
+localStorage.removeItem("avl_openSessionMarker");
+localStorage.removeItem("avl_plannedClosureUntil");
 
 //////////////////////////////////////////////////////
 // DISPATCH INACTIVITY TIMEOUT
@@ -1292,8 +1098,7 @@ function getSessionDiagnostics(session) {
       ? (lastGps ? "Valid position (quality not reported)" : "Not reported")
       : formatFixQuality(session.fixQuality)}`,
     `Satellites: ${session.satellites ?? "Unknown"}`,
-    `HDOP: ${session.hdop ?? "Unknown"}`,
-    `Closure explanation required: ${session.closureExplanationRequired ? "YES" : "NO"}`
+    `HDOP: ${session.hdop ?? "Unknown"}`
   ].join("\n");
 }
 
@@ -1366,10 +1171,15 @@ setupLoginInputHelpers();
 
 function applyModeUi() {
   const gpsControls = document.getElementById("unitGpsControls");
-  const unitIdInput = document.getElementById("unitId");
+  const activeIdentity = document.getElementById("activeIdentity");
+  const logoutButton = document.getElementById("logoutButton");
 
   if (gpsControls) gpsControls.classList.toggle("mode-hidden", userMode === "dispatch");
-  if (unitIdInput) unitIdInput.placeholder = userMode === "dispatch" ? "Dispatcher Name" : "Unit Number";
+  if (logoutButton) logoutButton.classList.toggle("mode-hidden", userMode !== "dispatch");
+  if (activeIdentity) {
+    const identityType = userMode === "dispatch" ? "Dispatcher" : "Unit";
+    activeIdentity.textContent = currentUnitId ? `${identityType}: ${currentUnitId}` : "Not logged in";
+  }
 
   document.querySelectorAll(".admin-only").forEach((el) => {
     const shouldShow = userRole === "admin" && (el.id !== "developerPanel" || developerPanelVisible);
@@ -1431,10 +1241,10 @@ function armUnexpectedDisconnectAudit() {
     role: userRole || "user",
     severity: "warning",
     eventType: "session_connection_ended_unexpectedly",
-    description: "Unit session/Firebase connection ended unexpectedly without a planned-closure reason",
+    description: "Unit session/Firebase connection ended unexpectedly",
     source: "system",
     reason: "Possible coverage loss, browser close, sleep, crash, or power loss",
-    closureReason: "Not provided before disconnect",
+    closureReason: "",
     closureNotes: "",
     deviceId: clientInstallId,
     sessionId: clientSessionId,
@@ -1564,8 +1374,7 @@ function publishPresence(heartbeatOnly = false) {
     lastNmeaTime: lastNmeaPacketTime || 0,
     fixQuality: serialFixQuality,
     satellites: serialSatellites,
-    hdop: serialHdop,
-    closureExplanationRequired: !!closureExplanationRequired
+    hdop: serialHdop
   };
 
   const heartbeatPayload = {
@@ -1582,8 +1391,7 @@ function publishPresence(heartbeatOnly = false) {
     lastNmeaTime: presencePayload.lastNmeaTime,
     fixQuality: presencePayload.fixQuality,
     satellites: presencePayload.satellites,
-    hdop: presencePayload.hdop,
-    closureExplanationRequired: presencePayload.closureExplanationRequired
+    hdop: presencePayload.hdop
   };
 
   const presenceWrite = heartbeatOnly
@@ -1671,7 +1479,6 @@ function forceBackToLogin(message) {
   }
 
   stopWatchingOwnDispatchSession();
-  markSessionClosureCompleted();
   clearSavedLogin();
 
   currentUnitId = null;
@@ -1749,7 +1556,6 @@ function restoreLogin() {
   startPresenceHeartbeat();
   watchOwnDispatchSession();
   startDispatchIdleMonitor();
-  beginSessionClosureTracking();
   setStatus(`Session restored for ${savedId}`, "good");
   addDiagnosticEvent(`Session restored: ${savedId} (${userMode})`);
   writeAuditEvent("session_restored", `Session restored for ${savedId} (${userMode})`, {
@@ -1829,7 +1635,6 @@ function login() {
   startPresenceHeartbeat();
   watchOwnDispatchSession();
   startDispatchIdleMonitor();
-  beginSessionClosureTracking();
   setStatus(`Logged in as ${id} (${mode}${userRole === "admin" ? ", admin" : ""})`, "good");
   addDiagnosticEvent(`Login: ${id} (${mode}${userRole === "admin" ? ", admin" : ""})`);
   writeAuditEvent("login", `Logged in as ${id} (${mode}${userRole === "admin" ? ", admin" : ""})`, {
@@ -1841,17 +1646,12 @@ function login() {
 }
 
 async function logout() {
-  if (userMode !== "dispatch" && userRole !== "admin" && !isPlannedClosureAuthorized()) {
-    showClosureReasonModal("planned");
-    return;
-  }
   await writeAuditEvent("logout", "Logout requested", {
     source: "user",
     severity: "action",
     includeLocation: userMode !== "dispatch",
     lookupStoredLocation: true
   });
-  markSessionClosureCompleted();
   stopAuditTrail();
   stopDispatchIdleMonitor();
   stopWatchingOwnDispatchSession();
@@ -2409,7 +2209,6 @@ function updateDeveloperInfo() {
     `Fix: ${formatFixQuality(serialFixQuality)}`,
     `Satellites: ${serialSatellites ?? "Unknown"}`,
     `HDOP: ${serialHdop ?? "Unknown"}`,
-    `Closure explanation required: ${closureExplanationRequired ? "YES" : "NO"}`,
     `Wake lock: ${wakeLock ? "ACTIVE" : "INACTIVE"}`,
     "",
     `SELECTED: ${selectedTitle}`,
@@ -2475,10 +2274,26 @@ function prioritizeAuthorizedSerialPorts(ports) {
 
   const preferredMatches = ports.filter((port) => getSerialPortSignature(port) === preferredSignature);
   if (preferredMatches.length) {
-    preferredSerialPort = preferredMatches[0];
+    const storedOrdinal = parseInt(localStorage.getItem("avl_preferredGpsOrdinal"), 10);
+    preferredSerialPort = Number.isInteger(storedOrdinal) && preferredMatches[storedOrdinal]
+      ? preferredMatches[storedOrdinal]
+      : preferredMatches[0];
     renderSelectedReceiverStatus();
   }
-  return preferredMatches;
+  return preferredSerialPort ? [preferredSerialPort] : [];
+}
+
+function clearPreferredSerialReceiverSelection() {
+  preferredSerialPort = null;
+  serialReconnectPort = null;
+  currentSerialLabel = "External USB GPS";
+  currentSerialPortId = "Not selected";
+  localStorage.removeItem("avl_preferredGpsSignature");
+  localStorage.removeItem("avl_preferredGpsLabel");
+  localStorage.removeItem("avl_preferredGpsPortId");
+  localStorage.removeItem("avl_preferredGpsOrdinal");
+  localStorage.removeItem("avl_hasAuthorizedGps");
+  renderSelectedReceiverStatus();
 }
 
 function getSerialEventPort(event) {
@@ -2612,33 +2427,81 @@ async function selectSerialGPSReceiver() {
   try {
     serialConnectionPhase = "Waiting for receiver selection";
     renderReceiverHealth();
-    setStatus("Choose the GPS receiver this unit should always use.", "warn");
+    setStatus("Choose the GPS receiver. AVL will verify that it is sending NMEA data.", "warn");
     const selectedPort = await navigator.serial.requestPort();
 
-    if (serialPort && serialPort !== selectedPort) {
-      await disconnectSerialGPS(true, { reason: "Receiver selection changed" });
+    // Selection replaces the app's old preference immediately. The exact port
+    // chosen in the fresh picker is retained and validated before being saved.
+    serialAutoMode = false;
+    serialConnectGeneration += 1;
+    serialConnectionAttemptQueued = false;
+    queuedConnectionIsManual = false;
+    cancelActiveSerialProbe();
+    await disconnectSerialGPS(false);
+    clearPreferredSerialReceiverSelection();
+
+    const selectionGeneration = ++serialConnectGeneration;
+    serialConnectionPhase = "Validating selected receiver by NMEA data";
+    setStatus(`Validating ${getSerialPortLabel(selectedPort)}... Close GPSInfo if it has the port open.`, "warn");
+    renderReceiverHealth();
+    const validated = await findNmeaGpsPort([selectedPort], selectionGeneration);
+
+    if (!validated || selectionGeneration !== serialConnectGeneration) {
+      if (typeof selectedPort.forget === "function") {
+        await selectedPort.forget().catch(() => {});
+      }
+      serialConnectionPhase = "Selected port did not produce valid GPS NMEA data";
+      setStatus("That port did not produce GPS data. Close GPSInfo or choose a different receiver, then press Select Receiver again.", "bad");
+      renderReceiverHealth();
+      writeAuditEvent("gps_receiver_selection_failed", "Selected serial port did not produce valid GPS NMEA data", {
+        source: "user",
+        severity: "warning",
+        buttonLabel: "Select Receiver",
+        reason: getSerialPortId(selectedPort)
+      });
+      return;
     }
 
-    preferredSerialPort = selectedPort;
-    serialReconnectPort = selectedPort;
-    currentSerialLabel = getSerialPortLabel(selectedPort);
-    currentSerialPortId = getSerialPortId(selectedPort);
-    const preferredSignature = getSerialPortSignature(selectedPort);
+    preferredSerialPort = validated.port;
+    serialReconnectPort = validated.port;
+    currentSerialBaud = validated.baudRate;
+    currentSerialLabel = getSerialPortLabel(validated.port);
+    currentSerialPortId = getSerialPortId(validated.port);
+    const preferredSignature = getSerialPortSignature(validated.port);
+    const authorizedPorts = await navigator.serial.getPorts();
+    const stalePorts = authorizedPorts.filter((port) => port !== validated.port);
+    let forgottenPortCount = 0;
+    for (const stalePort of stalePorts) {
+      if (typeof stalePort.forget !== "function") continue;
+      try {
+        await stalePort.forget();
+        forgottenPortCount += 1;
+      } catch (_) {}
+    }
+    const retainedPorts = await navigator.serial.getPorts();
+    const matchingPorts = retainedPorts.filter((port) => getSerialPortSignature(port) === preferredSignature);
+    const preferredOrdinal = Math.max(0, matchingPorts.indexOf(validated.port));
     localStorage.setItem("avl_preferredGpsSignature", preferredSignature);
     localStorage.setItem("avl_preferredGpsLabel", currentSerialLabel);
     localStorage.setItem("avl_preferredGpsPortId", currentSerialPortId);
+    localStorage.setItem("avl_preferredGpsOrdinal", String(preferredOrdinal));
     localStorage.setItem("avl_lastGpsSignature", preferredSignature);
+    localStorage.setItem("avl_lastBaudRate", String(currentSerialBaud));
     localStorage.setItem("avl_hasAuthorizedGps", "true");
+    serialConnectionPhase = `Receiver validated at ${currentSerialBaud} baud — ready to start`;
     renderSelectedReceiverStatus();
     renderReceiverHealth();
-    writeAuditEvent("gps_receiver_selected", `Preferred GPS receiver selected: ${currentSerialLabel}`, {
+    writeAuditEvent("gps_receiver_selected", `GPS receiver selected and NMEA-validated: ${currentSerialLabel} at ${currentSerialBaud} baud`, {
       source: "user",
       severity: "action",
       buttonLabel: "Select Receiver",
       reason: currentSerialPortId
     });
-    addDiagnosticEvent(`Preferred GPS receiver selected: ${currentSerialLabel}`);
-    setStatus(`Receiver selected: ${currentSerialLabel}. Press Start GPS.`, "good");
+    addDiagnosticEvent(
+      `GPS receiver selected and validated: ${currentSerialLabel} @ ${currentSerialBaud}` +
+      (forgottenPortCount ? `; cleared ${forgottenPortCount} stale serial permission${forgottenPortCount === 1 ? "" : "s"}` : "")
+    );
+    setStatus(`Receiver validated: ${currentSerialLabel} @ ${currentSerialBaud}. Press Start GPS.`, "good");
   } catch (err) {
     if (err?.name === "NotFoundError") {
       setStatus("Receiver selection canceled.", "warn");
@@ -2661,7 +2524,11 @@ async function restorePreferredSerialReceiver() {
 
   try {
     const authorizedPorts = await navigator.serial.getPorts();
-    preferredSerialPort = authorizedPorts.find((port) => getSerialPortSignature(port) === preferredSignature) || null;
+    const preferredMatches = authorizedPorts.filter((port) => getSerialPortSignature(port) === preferredSignature);
+    const storedOrdinal = parseInt(localStorage.getItem("avl_preferredGpsOrdinal"), 10);
+    preferredSerialPort = Number.isInteger(storedOrdinal) && preferredMatches[storedOrdinal]
+      ? preferredMatches[storedOrdinal]
+      : preferredMatches[0] || null;
     if (preferredSerialPort) {
       currentSerialLabel = getSerialPortLabel(preferredSerialPort);
       currentSerialPortId = getSerialPortId(preferredSerialPort);
@@ -2680,10 +2547,6 @@ restorePreferredSerialReceiver();
 
 async function connectSerialGPS(isRetry = false) {
   if (userMode === "dispatch") return alert("Dispatch view is view-only. GPS controls are disabled.");
-  if (closureExplanationRequired) {
-    showClosureReasonModal("retrospective", pendingPreviousClosureMarker);
-    return;
-  }
   const id = document.getElementById("unitId").value.trim();
   if (!id) return alert("Enter Unit ID first");
 
@@ -3479,8 +3342,8 @@ function updateMap(id, data) {
     markers[id].setPopupContent(popupHtml);
   }
 
-  // Do not automatically recenter the map on every GPS update.
-  // Use the "Center On My Unit" button when you want the map to jump back to your unit.
+  // Do not automatically recenter the map on every GPS update. Dispatchers
+  // control the fleet map position directly with normal pan/zoom gestures.
 }
 
 //////////////////////////////////////////////////////
@@ -3932,10 +3795,6 @@ function configureRosterDataSubscriptions() {
 
 function startBrowserGPS() {
   if (userMode === "dispatch") return alert("Dispatch view is view-only. GPS controls are disabled.");
-  if (closureExplanationRequired) {
-    showClosureReasonModal("retrospective", pendingPreviousClosureMarker);
-    return;
-  }
   const id = document.getElementById("unitId").value.trim();
   if (!id) return alert("Enter Unit ID first");
 
@@ -3990,47 +3849,8 @@ function startBrowserGPS() {
 }
 
 //////////////////////////////////////////////////////
-// LOG OFF / REMOVE UNIT
+// REMOVE UNIT
 //////////////////////////////////////////////////////
-
-async function logOffUnit() {
-  const id = currentUnitId || document.getElementById("unitId").value.trim();
-  if (!id) return alert("Enter Unit ID first");
-  if (userRole !== "admin" && !isPlannedClosureAuthorized()) {
-    showClosureReasonModal("planned");
-    return;
-  }
-
-  await writeAuditEvent("unit_logoff", "Unit logged off and ended its AVL session", {
-    source: "user",
-    severity: "action",
-    includeLocation: true,
-    locationUnitId: id,
-    lookupStoredLocation: true
-  });
-  markSessionClosureCompleted();
-
-  if (browserWatchId !== null) {
-    navigator.geolocation.clearWatch(browserWatchId);
-    browserWatchId = null;
-  }
-
-  await disconnectSerialGPS(true, { bypassLock: true, endSession: true, reason: "Unit logoff" });
-  await stopLiveUnitPublishing(id);
-  await stopPresence(true);
-  await unitsRef.child(id).remove();
-
-  if (markers[id]) {
-    map.removeLayer(markers[id]);
-    delete markers[id];
-  }
-
-  currentUnitId = null;
-  configureRosterDataSubscriptions();
-
-  setStatus("Unit logged off", "warn");
-  setFixDetails("Unit logged off.");
-}
 
 async function forceRemoveUnit() {
   if (userRole !== "admin") {
@@ -4069,7 +3889,6 @@ async function forceRemoveUnit() {
     }
 
     if (id === currentUnitId) {
-      markSessionClosureCompleted();
       await disconnectSerialGPS(true, { bypassLock: true, endSession: true, reason: "Administrator removal" });
       await stopLiveUnitPublishing(id);
     }
