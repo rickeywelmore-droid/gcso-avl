@@ -20,14 +20,14 @@ const auditMetricsRef = db.ref("auditMetrics");
 /*********************************************************************
  GCSO AVL CONFIGURATION
  --------------------------------------------------------------------
- Version: 1.1.15
- Build: 2026-08-31
+ Version: 1.1.16
+ Build: 2026-09-05
 
  Temporary client-side access gate. This is a convenience barrier,
  not strong authentication.
 *********************************************************************/
-const APP_VERSION = "1.1.15";
-const BUILD_DATE = "2026-08-31";
+const APP_VERSION = "1.1.16";
+const BUILD_DATE = "2026-09-05";
 const USER_PASSWORD = "GCSO123";
 const ADMIN_PASSWORD = "GCSOADMIN123";
 const PRESENCE_TIMEOUT_MINUTES = 2;
@@ -50,7 +50,7 @@ const AUDIT_PAGE_SIZE = 100;
 const AUDIT_STORAGE_LIMIT_BYTES = 1024 * 1024 * 1024;
 const AUDIT_STORAGE_WARNING_BYTES = 750 * 1024 * 1024;
 const AUDIT_LEGACY_RESERVE_BYTES = 1024 * 1024;
-const GPS_PROBE_MS = 5000;
+const GPS_PROBE_MS = 3000;
 const GPS_RESCAN_MS = 3000;
 const SERIAL_REENUMERATION_MS = 2500;
 const SERIAL_STALL_MS = 12000;
@@ -186,6 +186,8 @@ let serialReadGeneration = 0;
 let serialConnectionAttemptInProgress = false;
 let serialConnectionAttemptQueued = false;
 let queuedConnectionIsManual = false;
+let serialForceBaudScan = false;
+let serialFailedBaud = null;
 let serialProbeReader = null;
 let serialProbePort = null;
 let currentSerialLabel = "External USB GPS";
@@ -215,7 +217,10 @@ let unitPublishTimer = null;
 let unitPublishTimerDue = 0;
 let unitPublishInFlight = false;
 let unitPublishInFlightPromise = null;
+let unitPublishEpoch = 0;
 let sessionRosterSubscribed = false;
+let dispatchRosterSubscribed = false;
+let dispatchSessionQuery = null;
 let preferredSerialPort = null;
 
 const SERIAL_BAUD_RATES = [9600, 4800, 38400, 115200];
@@ -1962,14 +1967,14 @@ function restorePendingFix() {
   } catch (_) {}
 }
 
-async function publishUnitData(id, data) {
+async function publishUnitData(id, data, publishEpoch = unitPublishEpoch) {
   if (!id || !data) return false;
   savePendingFix(id, data);
 
   try {
     await unitsRef.child(id).set(data);
     lastSuccessfulWriteTime = Date.now();
-    if (id === currentUnitId && isValidLatLon(data.lat, data.lon)) {
+    if (publishEpoch === unitPublishEpoch && id === currentUnitId && isValidLatLon(data.lat, data.lon)) {
       lastNetworkPublishedFix = data;
       lastNetworkPublishedUnitId = id;
       lastNetworkPublishTime = lastSuccessfulWriteTime;
@@ -2075,8 +2080,11 @@ async function flushQueuedUnitPublish(reason = "scheduled") {
   }
 
   unitPublishInFlight = true;
-  unitPublishInFlightPromise = publishUnitData(id, data);
-  const succeeded = await unitPublishInFlightPromise;
+  const publishEpoch = unitPublishEpoch;
+  const publishPromise = publishUnitData(id, data, publishEpoch);
+  unitPublishInFlightPromise = publishPromise;
+  const succeeded = await publishPromise;
+  if (unitPublishInFlightPromise !== publishPromise) return succeeded;
   unitPublishInFlightPromise = null;
   unitPublishInFlight = false;
   debugLog(`Live GPS publish ${succeeded ? "completed" : "failed"}: ${publishReason}`);
@@ -2091,6 +2099,7 @@ async function flushQueuedUnitPublish(reason = "scheduled") {
 }
 
 async function stopLiveUnitPublishing(id, discardOfflineFix = true) {
+  unitPublishEpoch += 1;
   clearUnitPublishTimer();
   if (!id || queuedUnitPublishId === id) {
     queuedUnitPublishId = null;
@@ -2098,9 +2107,11 @@ async function stopLiveUnitPublishing(id, discardOfflineFix = true) {
     queuedUnitPublishReason = "";
   }
 
-  // Let a write that already reached Firebase finish before the explicit
-  // logout removal. This prevents a late write from resurrecting the unit.
-  if (unitPublishInFlightPromise) await unitPublishInFlightPromise.catch(() => {});
+  // Firebase preserves local write order, so the following remove is queued
+  // after any earlier position write. Detach that older promise so poor service
+  // cannot delay Stop GPS or block a later Start GPS from publishing.
+  unitPublishInFlightPromise = null;
+  unitPublishInFlight = false;
 
   if (discardOfflineFix && (!id || lastPendingUnitId === id)) {
     lastPendingFix = null;
@@ -2196,7 +2207,7 @@ function updateDeveloperInfo() {
     `Presence heartbeat: ${HEARTBEAT_SECONDS} sec dynamic-field update`,
     `Last live GPS publish: ${lastNetworkPublishTime ? formatLastUpdateAge(lastNetworkPublishTime) : "Not published yet"}`,
     `Live GPS fix queued: ${queuedUnitPublishData ? "YES" : "NO"}`,
-    `Full session roster feed: ${sessionRosterSubscribed ? "ENABLED (dispatch/admin)" : "DISABLED (bandwidth-saving unit mode)"}`,
+    `Session roster feed: ${sessionRosterSubscribed ? "FULL (dispatch/admin)" : dispatchRosterSubscribed ? "DISPATCH ONLY (bandwidth-saving unit mode)" : "DISABLED"}`,
     `Pending fix: ${lastPendingFix ? "YES" : "NO"}`,
     `Pending audit events: ${pendingAuditEvents.length}`,
     `Serial: ${serialPort ? `CONNECTED @ ${currentSerialBaud || "?"}` : "DISCONNECTED"}`,
@@ -2292,6 +2303,8 @@ function clearPreferredSerialReceiverSelection() {
   localStorage.removeItem("avl_preferredGpsLabel");
   localStorage.removeItem("avl_preferredGpsPortId");
   localStorage.removeItem("avl_preferredGpsOrdinal");
+  localStorage.removeItem("avl_preferredGpsBaud");
+  localStorage.removeItem("avl_preferredGpsValidated");
   localStorage.removeItem("avl_hasAuthorizedGps");
   renderSelectedReceiverStatus();
 }
@@ -2305,11 +2318,13 @@ function cancelActiveSerialProbe() {
   if (serialProbeReader) serialProbeReader.cancel().catch(() => {});
 }
 
-function getBaudCandidates() {
+function getBaudCandidates(excludedBaud = null) {
   const baudSelect = document.getElementById("baudRate");
   const selected = parseInt(baudSelect?.value || localStorage.getItem("avl_lastBaudRate"), 10) || 4800;
   localStorage.setItem("avl_lastBaudRate", String(selected));
-  return [selected, ...SERIAL_BAUD_RATES].filter((v, i, arr) => arr.indexOf(v) === i);
+  return [selected, ...SERIAL_BAUD_RATES]
+    .filter((v, i, arr) => arr.indexOf(v) === i)
+    .filter((v) => v !== excludedBaud);
 }
 
 function looksLikeNMEA(sentence) {
@@ -2427,49 +2442,34 @@ async function selectSerialGPSReceiver() {
   try {
     serialConnectionPhase = "Waiting for receiver selection";
     renderReceiverHealth();
-    setStatus("Choose the GPS receiver. AVL will verify that it is sending NMEA data.", "warn");
+    setStatus("Choose the GPS receiver attached to this computer.", "warn");
     const selectedPort = await navigator.serial.requestPort();
+    const previousLastSignature = localStorage.getItem("avl_lastGpsSignature");
+    const previousLastBaud = parseInt(localStorage.getItem("avl_lastBaudRate"), 10);
 
-    // Selection replaces the app's old preference immediately. The exact port
-    // chosen in the fresh picker is retained and validated before being saved.
+    // Selecting hardware must not depend on an immediate satellite fix or even
+    // an immediately available NMEA stream. Start GPS owns the connection test.
     serialAutoMode = false;
     serialConnectGeneration += 1;
     serialConnectionAttemptQueued = false;
     queuedConnectionIsManual = false;
+    serialForceBaudScan = false;
+    serialFailedBaud = null;
     cancelActiveSerialProbe();
     await disconnectSerialGPS(false);
     clearPreferredSerialReceiverSelection();
 
-    const selectionGeneration = ++serialConnectGeneration;
-    serialConnectionPhase = "Validating selected receiver by NMEA data";
-    setStatus(`Validating ${getSerialPortLabel(selectedPort)}... Close GPSInfo if it has the port open.`, "warn");
-    renderReceiverHealth();
-    const validated = await findNmeaGpsPort([selectedPort], selectionGeneration);
-
-    if (!validated || selectionGeneration !== serialConnectGeneration) {
-      if (typeof selectedPort.forget === "function") {
-        await selectedPort.forget().catch(() => {});
-      }
-      serialConnectionPhase = "Selected port did not produce valid GPS NMEA data";
-      setStatus("That port did not produce GPS data. Close GPSInfo or choose a different receiver, then press Select Receiver again.", "bad");
-      renderReceiverHealth();
-      writeAuditEvent("gps_receiver_selection_failed", "Selected serial port did not produce valid GPS NMEA data", {
-        source: "user",
-        severity: "warning",
-        buttonLabel: "Select Receiver",
-        reason: getSerialPortId(selectedPort)
-      });
-      return;
-    }
-
-    preferredSerialPort = validated.port;
-    serialReconnectPort = validated.port;
-    currentSerialBaud = validated.baudRate;
-    currentSerialLabel = getSerialPortLabel(validated.port);
-    currentSerialPortId = getSerialPortId(validated.port);
-    const preferredSignature = getSerialPortSignature(validated.port);
+    preferredSerialPort = selectedPort;
+    serialReconnectPort = selectedPort;
+    currentSerialLabel = getSerialPortLabel(selectedPort);
+    currentSerialPortId = getSerialPortId(selectedPort);
+    const preferredSignature = getSerialPortSignature(selectedPort);
+    currentSerialBaud = (
+      previousLastSignature === preferredSignature &&
+      SERIAL_BAUD_RATES.includes(previousLastBaud)
+    ) ? previousLastBaud : 4800;
     const authorizedPorts = await navigator.serial.getPorts();
-    const stalePorts = authorizedPorts.filter((port) => port !== validated.port);
+    const stalePorts = authorizedPorts.filter((port) => port !== selectedPort);
     let forgottenPortCount = 0;
     for (const stalePort of stalePorts) {
       if (typeof stalePort.forget !== "function") continue;
@@ -2480,28 +2480,27 @@ async function selectSerialGPSReceiver() {
     }
     const retainedPorts = await navigator.serial.getPorts();
     const matchingPorts = retainedPorts.filter((port) => getSerialPortSignature(port) === preferredSignature);
-    const preferredOrdinal = Math.max(0, matchingPorts.indexOf(validated.port));
+    const preferredOrdinal = Math.max(0, matchingPorts.indexOf(selectedPort));
     localStorage.setItem("avl_preferredGpsSignature", preferredSignature);
     localStorage.setItem("avl_preferredGpsLabel", currentSerialLabel);
     localStorage.setItem("avl_preferredGpsPortId", currentSerialPortId);
     localStorage.setItem("avl_preferredGpsOrdinal", String(preferredOrdinal));
-    localStorage.setItem("avl_lastGpsSignature", preferredSignature);
-    localStorage.setItem("avl_lastBaudRate", String(currentSerialBaud));
+    localStorage.setItem("avl_preferredGpsBaud", String(currentSerialBaud));
     localStorage.setItem("avl_hasAuthorizedGps", "true");
-    serialConnectionPhase = `Receiver validated at ${currentSerialBaud} baud — ready to start`;
+    serialConnectionPhase = `Receiver selected — ready to open at ${currentSerialBaud} baud`;
     renderSelectedReceiverStatus();
     renderReceiverHealth();
-    writeAuditEvent("gps_receiver_selected", `GPS receiver selected and NMEA-validated: ${currentSerialLabel} at ${currentSerialBaud} baud`, {
+    writeAuditEvent("gps_receiver_selected", `GPS receiver selected: ${currentSerialLabel}; initial baud ${currentSerialBaud}`, {
       source: "user",
       severity: "action",
       buttonLabel: "Select Receiver",
       reason: currentSerialPortId
     });
     addDiagnosticEvent(
-      `GPS receiver selected and validated: ${currentSerialLabel} @ ${currentSerialBaud}` +
+      `GPS receiver selected: ${currentSerialLabel}; initial baud ${currentSerialBaud}` +
       (forgottenPortCount ? `; cleared ${forgottenPortCount} stale serial permission${forgottenPortCount === 1 ? "" : "s"}` : "")
     );
-    setStatus(`Receiver validated: ${currentSerialLabel} @ ${currentSerialBaud}. Press Start GPS.`, "good");
+    setStatus(`Receiver selected: ${currentSerialLabel}. Press Start GPS.`, "good");
   } catch (err) {
     if (err?.name === "NotFoundError") {
       setStatus("Receiver selection canceled.", "warn");
@@ -2567,6 +2566,8 @@ async function connectSerialGPS(isRetry = false) {
 
   serialAutoMode = true;
   if (!isRetry) {
+    serialForceBaudScan = false;
+    serialFailedBaud = null;
     pendingManualGpsStart = {
       requestedAt: Date.now(),
       buttonLabel: "Start GPS"
@@ -2640,14 +2641,36 @@ async function runSerialGpsConnectionAttempt(isRetry, attemptGeneration) {
       return;
     }
 
-    serialConnectionPhase = "Validating selected GPS receiver";
-    setStatus(`Starting ${getPreferredReceiverDescription()}...`, "warn");
-    renderReceiverHealth();
+    const preferredBaud = parseInt(
+      localStorage.getItem("avl_preferredGpsBaud") ||
+      localStorage.getItem("avl_lastBaudRate"),
+      10
+    ) || 4800;
+    let found = null;
 
-    const found = await findNmeaGpsPort(ports, attemptGeneration);
+    if (!serialForceBaudScan) {
+      // The deputy already chose this exact hardware. Open it immediately;
+      // selection must not depend on the receiver already having a GPS fix.
+      found = { port: ports[0], baudRate: preferredBaud };
+      serialConnectionPhase = `Opening selected receiver directly at ${preferredBaud} baud`;
+      setStatus(`Opening ${getPreferredReceiverDescription()} @ ${preferredBaud} baud...`, "warn");
+      renderReceiverHealth();
+    } else {
+      serialConnectionPhase = "No NMEA at preferred baud — checking alternate baud rates";
+      setStatus(`Receiver opened but sent no NMEA at ${serialFailedBaud || preferredBaud} baud. Checking alternate rates...`, "warn");
+      renderReceiverHealth();
+      found = await findNmeaGpsPort(ports, attemptGeneration, serialFailedBaud);
+      if (found) {
+        localStorage.setItem("avl_preferredGpsBaud", String(found.baudRate));
+        serialForceBaudScan = false;
+        serialFailedBaud = null;
+      }
+    }
     if (!attemptIsCurrent()) return;
 
     if (!found) {
+      serialForceBaudScan = false;
+      serialFailedBaud = null;
       scheduleSerialRescan("No valid NMEA GPS stream found");
       return;
     }
@@ -2667,6 +2690,7 @@ async function runSerialGpsConnectionAttempt(isRetry, attemptGeneration) {
     currentSerialPortId = getSerialPortId(serialPort);
     localStorage.setItem("avl_lastGpsSignature", getSerialPortSignature(serialPort));
     localStorage.setItem("avl_lastBaudRate", String(currentSerialBaud));
+    localStorage.setItem("avl_preferredGpsBaud", String(currentSerialBaud));
     localStorage.setItem("avl_hasAuthorizedGps", "true");
     const baudSelect = document.getElementById("baudRate");
     if (baudSelect) baudSelect.value = String(currentSerialBaud);
@@ -2691,7 +2715,7 @@ async function runSerialGpsConnectionAttempt(isRetry, attemptGeneration) {
     serialOpenedTime = Date.now();
     lastNmeaPacketTime = 0;
     serialConnectionPhase = "Serial port open — waiting for NMEA";
-    setStatus(`External GPS locked: ${currentSerialLabel} @ ${currentSerialBaud} baud`, "good");
+    setStatus(`External GPS connected: ${currentSerialLabel} @ ${currentSerialBaud} baud — waiting for position`, "good");
     addDiagnosticEvent(`External GPS connected @ ${currentSerialBaud} baud`);
     writeAuditEvent("serial_connected", `External GPS connected at ${currentSerialBaud} baud`, {
       source: isRetry ? "automatic" : "user",
@@ -2724,8 +2748,8 @@ async function runSerialGpsConnectionAttempt(isRetry, attemptGeneration) {
   }
 }
 
-async function findNmeaGpsPort(ports, attemptGeneration) {
-  const baudCandidates = getBaudCandidates();
+async function findNmeaGpsPort(ports, attemptGeneration, excludedBaud = null) {
+  const baudCandidates = getBaudCandidates(excludedBaud);
 
   for (const port of ports) {
     for (const baudRate of baudCandidates) {
@@ -2820,6 +2844,8 @@ async function disconnectSerialGPS(manual = true, options = {}) {
     serialConnectGeneration += 1;
     serialConnectionAttemptQueued = false;
     queuedConnectionIsManual = false;
+    serialForceBaudScan = false;
+    serialFailedBaud = null;
     cancelActiveSerialProbe();
   }
 
@@ -2858,9 +2884,9 @@ async function disconnectSerialGPS(manual = true, options = {}) {
       serialOpenedTime = 0;
       lastNmeaPacketTime = 0;
       lastNmeaSentenceType = "None";
-      setStatus("External GPS disconnected", "warn");
       addDiagnosticEvent("External GPS disconnected");
       const endingSession = !!options.endSession;
+      const stoppedUnitId = currentUnitId;
       writeAuditEvent(
         endingSession ? "serial_disconnected_for_session_end" : "serial_manual_disconnect",
         endingSession ? `External GPS stopped as part of session closure${options.reason ? `: ${options.reason}` : ""}` : "Stop GPS requested",
@@ -2868,9 +2894,31 @@ async function disconnectSerialGPS(manual = true, options = {}) {
           source: userRole === "admin" ? "admin" : "user",
           severity: "action",
           buttonLabel: endingSession ? "Session closure" : "Stop GPS",
-          reason: options.reason || ""
+          reason: options.reason || "",
+          includeLocation: userMode !== "dispatch",
+          locationData: lastFixUnitId === stoppedUnitId ? lastFix : null,
+          lookupStoredLocation: true
         }
       );
+
+      if (!endingSession && stoppedUnitId && userMode !== "dispatch") {
+        // Stop means off the live map. Keep the saved login/presence session so
+        // the same deputy can press Start GPS again without signing back in.
+        await stopLiveUnitPublishing(stoppedUnitId);
+        await unitsRef.child(stoppedUnitId).remove().catch((err) => {
+          console.warn(`Unable to remove stopped unit ${stoppedUnitId} from live map:`, err);
+        });
+        delete latestUnits[stoppedUnitId];
+        if (markers[stoppedUnitId]) {
+          map.removeLayer(markers[stoppedUnitId]);
+          delete markers[stoppedUnitId];
+        }
+        scheduleRenderUnitList();
+        setStatus("GPS stopped — unit removed from live map", "warn");
+        setFixDetails("GPS stopped. This unit is off the live map. Press Start GPS to return.");
+      } else {
+        setStatus("External GPS disconnected", "warn");
+      }
     }
     renderReceiverHealth();
     return true;
@@ -2954,8 +3002,23 @@ async function checkSerialStreamHealth() {
 
   serialWatchdogRecoveryInProgress = true;
   const stalledSeconds = Math.round((Date.now() - streamReferenceTime) / 1000);
-  serialConnectionPhase = `NMEA stream stalled for ${stalledSeconds} sec — restarting receiver`;
-  setStatus("External GPS stream stalled. Restarting receiver...", "warn");
+  const neverReceivedNmea = !lastNmeaPacketTime;
+  if (neverReceivedNmea) {
+    serialForceBaudScan = true;
+    serialFailedBaud = currentSerialBaud;
+  } else {
+    serialForceBaudScan = false;
+    serialFailedBaud = null;
+  }
+  serialConnectionPhase = neverReceivedNmea
+    ? `No NMEA at ${currentSerialBaud || "selected"} baud for ${stalledSeconds} sec — checking alternates`
+    : `NMEA stream stalled for ${stalledSeconds} sec — restarting receiver`;
+  setStatus(
+    neverReceivedNmea
+      ? "Receiver opened but sent no NMEA. Checking alternate baud rates..."
+      : "External GPS stream stalled. Restarting receiver...",
+    "warn"
+  );
   addDiagnosticEvent(`Serial watchdog detected ${stalledSeconds} sec without NMEA`);
   writeAuditEvent(
     "serial_stream_stalled",
@@ -2986,6 +3049,8 @@ function handleNMEA(sentence) {
 
   lastNmeaPacketTime = Date.now();
   serialWatchdogRecoveryInProgress = false;
+  serialForceBaudScan = false;
+  serialFailedBaud = null;
   lastNmeaSentenceType = sentence.split(",")[0].replace(/^\$/, "") || "Unknown";
   serialConnectionPhase = "Receiving NMEA data";
   renderReceiverHealth();
@@ -3767,6 +3832,10 @@ function shouldSubscribeToSessionRoster() {
   return !!currentUnitId && (userMode === "dispatch" || userRole === "admin");
 }
 
+function shouldSubscribeToDispatchRoster() {
+  return !!currentUnitId && userMode === "unit" && userRole !== "admin";
+}
+
 function startSessionRosterSubscription() {
   if (sessionRosterSubscribed) return;
   sessionRosterSubscribed = true;
@@ -3785,9 +3854,44 @@ function stopSessionRosterSubscription() {
   scheduleRenderUnitList();
 }
 
+function startDispatchRosterSubscription() {
+  if (dispatchRosterSubscribed) return;
+  dispatchRosterSubscribed = true;
+  dispatchSessionQuery = sessionsRef
+    .orderByKey()
+    .startAt("dispatch_")
+    .endAt("dispatch_\uf8ff");
+  dispatchSessionQuery.on("child_added", handleSessionAddedOrChanged);
+  dispatchSessionQuery.on("child_changed", handleSessionAddedOrChanged);
+  dispatchSessionQuery.on("child_removed", handleSessionRemoved);
+}
+
+function stopDispatchRosterSubscription() {
+  if (!dispatchRosterSubscribed || !dispatchSessionQuery) return;
+  dispatchSessionQuery.off("child_added", handleSessionAddedOrChanged);
+  dispatchSessionQuery.off("child_changed", handleSessionAddedOrChanged);
+  dispatchSessionQuery.off("child_removed", handleSessionRemoved);
+  dispatchRosterSubscribed = false;
+  dispatchSessionQuery = null;
+  latestSessions = {};
+  scheduleRenderUnitList();
+}
+
 function configureRosterDataSubscriptions() {
-  if (shouldSubscribeToSessionRoster()) startSessionRosterSubscription();
-  else stopSessionRosterSubscription();
+  if (shouldSubscribeToSessionRoster()) {
+    stopDispatchRosterSubscription();
+    startSessionRosterSubscription();
+    return;
+  }
+
+  if (shouldSubscribeToDispatchRoster()) {
+    stopSessionRosterSubscription();
+    startDispatchRosterSubscription();
+    return;
+  }
+
+  stopSessionRosterSubscription();
+  stopDispatchRosterSubscription();
 }
 //////////////////////////////////////////////////////
 // BROWSER GPS FALLBACK
