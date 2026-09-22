@@ -1,6 +1,7 @@
 # GCSO AVL TODO
 
 ## High priority
+- [ ] Field-test Light / Dark / High Contrast map themes on rural back roads.
 - [ ] Field-test v1.1.8 rural service-loss recovery, newest-fix republishing, and Firebase transport retry.
 - [ ] Confirm dispatcher presence across phone and desktop sessions.
 - [ ] Confirm stale/off-duty units expire at the desired interval.

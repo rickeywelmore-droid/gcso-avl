@@ -21,14 +21,23 @@ html, body {
       flex: 1;
     }
 
-    /* Dark mode map contrast boost.
-       Uses standard OSM tiles with a CSS dark filter so road labels remain readable. */
-    body.dark .leaflet-container {
-      background: #111;
+    /* Map themes are independent from the interface theme.
+       Dark uses a purpose-built dark basemap instead of inverting OSM, because
+       inversion turns light rural roads dark and makes them disappear. */
+    #map.map-theme-light { background: #e9e7e1; }
+    #map.map-theme-dark,
+    #map.map-theme-high-contrast { background: #111; }
+
+    #map.map-theme-light .leaflet-tile-pane img,
+    #map.map-theme-dark .leaflet-tile-pane img {
+      filter: none;
     }
 
-    body.dark .leaflet-tile-pane img {
-      filter: invert(1) hue-rotate(180deg) brightness(0.95) contrast(1.35) saturate(0.75);
+    /* Brighter night/rural view. Labels and minor roads are baked into the raster
+       tiles, so lifting brightness + contrast together improves both without
+       affecting AVL markers or Leaflet controls. */
+    #map.map-theme-high-contrast .leaflet-tile-pane img {
+      filter: brightness(1.42) contrast(1.28) saturate(0.82);
     }
 
     input, button, select {

@@ -19,13 +19,13 @@ const auditLogsRef = db.ref("auditLogs");
 /*********************************************************************
  GCSO AVL CONFIGURATION
  --------------------------------------------------------------------
- Version: 1.1.8
+ Version: 1.1.9
  Build: 2026-09-22
 
  Temporary client-side access gate. This is a convenience barrier,
  not strong authentication.
 *********************************************************************/
-const APP_VERSION = "1.1.8";
+const APP_VERSION = "1.1.9";
 const BUILD_DATE = "2026-09-22";
 const USER_PASSWORD = "GCSO123";
 const ADMIN_PASSWORD = "GCSOADMIN123";
@@ -50,29 +50,43 @@ function debugLog(...args) {
 
 const map = L.map("map").setView([38.9, -84.5], 10);
 
-let lightTiles = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-  maxZoom: 19
-}).addTo(map);
-
-let darkTiles = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+// Map themes are intentionally independent from the sidebar/interface theme.
+// This lets deputies keep the AVL controls dark while using the basemap that
+// is easiest to read for the road network they are working.
+const lightTiles = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
   maxZoom: 19,
-  attribution: '&copy; OpenStreetMap contributors',
-  className: "dark-contrast-tiles"
+  attribution: '&copy; OpenStreetMap contributors'
 });
 
+const darkTiles = L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
+  maxZoom: 20,
+  subdomains: "abcd",
+  attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
+});
+
+const highContrastTiles = L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
+  maxZoom: 20,
+  subdomains: "abcd",
+  attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
+});
+
+const MAP_THEMES = {
+  light: lightTiles,
+  dark: darkTiles,
+  highContrast: highContrastTiles
+};
+
 let darkMode = localStorage.getItem("avl_darkMode") === "true";
+let mapTheme = localStorage.getItem("avl_mapTheme");
+
+if (!MAP_THEMES[mapTheme]) {
+  // Preserve the old behavior on the first load after upgrading: users who
+  // previously used Dark Mode begin with the dark map, everyone else with light.
+  mapTheme = darkMode ? "dark" : "light";
+}
 
 function applyDarkMode() {
   document.body.classList.toggle("dark", darkMode);
-
-  if (darkMode) {
-    if (map.hasLayer(lightTiles)) map.removeLayer(lightTiles);
-    if (!map.hasLayer(darkTiles)) darkTiles.addTo(map);
-  } else {
-    if (map.hasLayer(darkTiles)) map.removeLayer(darkTiles);
-    if (!map.hasLayer(lightTiles)) lightTiles.addTo(map);
-  }
-
   localStorage.setItem("avl_darkMode", darkMode ? "true" : "false");
   setTimeout(() => map.invalidateSize(), 200);
 }
@@ -82,7 +96,33 @@ function toggleDarkMode() {
   applyDarkMode();
 }
 
+function applyMapTheme() {
+  for (const layer of Object.values(MAP_THEMES)) {
+    if (map.hasLayer(layer)) map.removeLayer(layer);
+  }
+
+  MAP_THEMES[mapTheme].addTo(map);
+
+  const mapContainer = map.getContainer();
+  mapContainer.classList.remove("map-theme-light", "map-theme-dark", "map-theme-high-contrast");
+  const themeClass = mapTheme === "highContrast" ? "map-theme-high-contrast" : `map-theme-${mapTheme}`;
+  mapContainer.classList.add(themeClass);
+
+  const themeSelect = document.getElementById("mapTheme");
+  if (themeSelect) themeSelect.value = mapTheme;
+
+  localStorage.setItem("avl_mapTheme", mapTheme);
+  setTimeout(() => map.invalidateSize(), 200);
+}
+
+function setMapTheme(theme) {
+  if (!MAP_THEMES[theme]) return;
+  mapTheme = theme;
+  applyMapTheme();
+}
+
 applyDarkMode();
+applyMapTheme();
 
 function restoreSavedBaudRate() {
   const baudSelect = document.getElementById("baudRate");

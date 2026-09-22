@@ -10,7 +10,7 @@
   <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-database-compat.js"></script>
 
-  <link rel="stylesheet" href="styles.css"/>
+  <link rel="stylesheet" href="styles.css?v=1.1.9"/>
 
 </head>
 
@@ -38,7 +38,14 @@
     <h3>Gallatin County Sheriff's Office AVL</h3>
 
     <div id="networkStatus" class="network-banner">NETWORK: CHECKING...</div>
-    <button onclick="toggleDarkMode()">Toggle Dark Mode</button>
+    <button onclick="toggleDarkMode()">Toggle Interface Dark Mode</button>
+
+    <label for="mapTheme">Map Theme</label>
+    <select id="mapTheme" onchange="setMapTheme(this.value)">
+      <option value="light">Light — Maximum Detail</option>
+      <option value="dark">Dark — Night</option>
+      <option value="highContrast">High Contrast — Rural / Night</option>
+    </select>
 
     <input id="unitId" placeholder="Unit ID / Dispatch Name" />
 
@@ -82,7 +89,7 @@
     <div id="serialHealth" class="serial-health">External GPS diagnostics will appear here.</div>
     <div id="fixDetails">Fix details will appear here.</div>
 
-    <div class="app-version">GCSO AVL v1.1.8 · Build 2026-09-22</div>
+    <div class="app-version">GCSO AVL v1.1.9 · Build 2026-09-22</div>
 
     <div id="developerPanel" class="admin-only mode-hidden">
       <div class="section-title">DEVELOPER PANEL</div>
@@ -133,6 +140,6 @@
   </div>
 </div>
 
-<script src="app.js?v=1.1.8"></script>
+<script src="app.js?v=1.1.9"></script>
 </body>
 </html>

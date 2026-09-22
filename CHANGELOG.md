@@ -1,5 +1,12 @@
 # GCSO AVL Changelog
 
+## 1.1.9 — Map Theme Test (2026-09-22)
+- Separated the interface dark mode from the basemap theme so each can be selected independently.
+- Added Light, Dark, and High Contrast map themes with the selected map theme remembered per device.
+- Replaced the old CSS-inverted dark OpenStreetMap view with CARTO Dark Matter, avoiding the inverted-road problem that made rural roads nearly disappear.
+- Added a brighter High Contrast rural/night mode that increases road and label visibility without altering AVL unit markers.
+- Added cache-busting for both JavaScript and CSS so map-style changes load immediately after deployment.
+
 ## 1.1.8 — Serial Recovery & Reconnect Hardening (2026-09-22)
 - Added self-resynchronizing NMEA framing and parser-buffer reset on serial reconnect.
 - Added serial packet/NMEA watchdogs that distinguish a stalled serial stream from healthy NMEA with no position fix.
