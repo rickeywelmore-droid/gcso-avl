@@ -21,23 +21,14 @@ html, body {
       flex: 1;
     }
 
-    /* Map themes are independent from the interface theme.
-       Dark uses a purpose-built dark basemap instead of inverting OSM, because
-       inversion turns light rural roads dark and makes them disappear. */
-    #map.map-theme-light { background: #e9e7e1; }
-    #map.map-theme-dark,
-    #map.map-theme-high-contrast { background: #111; }
-
-    #map.map-theme-light .leaflet-tile-pane img,
-    #map.map-theme-dark .leaflet-tile-pane img {
-      filter: none;
+    /* Dark mode map contrast boost.
+       Uses standard OSM tiles with a CSS dark filter so road labels remain readable. */
+    body.dark .leaflet-container {
+      background: #111;
     }
 
-    /* Brighter night/rural view. Labels and minor roads are baked into the raster
-       tiles, so lifting brightness + contrast together improves both without
-       affecting AVL markers or Leaflet controls. */
-    #map.map-theme-high-contrast .leaflet-tile-pane img {
-      filter: brightness(1.42) contrast(1.28) saturate(0.82);
+    body.dark .leaflet-tile-pane img {
+      filter: invert(1) hue-rotate(180deg) brightness(0.95) contrast(1.35) saturate(0.75);
     }
 
     input, button, select {
@@ -311,7 +302,7 @@ html, body {
 
     body.dark #gpsStatus,
     body.dark #fixDetails,
-    body.dark #rawNmea {
+body.dark #rawNmea {
       background: #0d0d0d;
       color: #e6e6e6;
     }
@@ -381,6 +372,30 @@ html, body {
   border-top: 1px solid #2b2b2b;
 }
 
+.receiver-health {
+  margin: 10px 0;
+  padding: 10px;
+  border: 1px solid #3c4b57;
+  border-left: 4px solid #d39b2a;
+  border-radius: 4px;
+  background: #17202a;
+  color: #eef4f8;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-line;
+}
+
+.receiver-health.good { border-left-color: #39c66d; }
+.receiver-health.warn { border-left-color: #d39b2a; }
+.receiver-health.bad { border-left-color: #db4c4c; }
+
+.receiver-health-title {
+  margin-bottom: 5px;
+  color: #9fc5e8;
+  font-weight: 700;
+  letter-spacing: .04em;
+}
+
 
 .idle-modal {
   position: fixed;
@@ -431,7 +446,13 @@ html, body {
 }
 
 
-/* Admin five-day audit trail */
+/* Shift GPS disconnect lock */
+.gps-lock-status { margin:6px 0 9px; padding:8px; border:1px solid rgba(128,128,128,.55); border-radius:4px; font-size:11px; line-height:1.35; }
+.gps-lock-status.gps-lock-active { background:rgba(180,38,38,.18); border-color:#c74440; color:#ffb8b5; font-weight:800; }
+.gps-disconnect-locked { background:#7f1d1d !important; border-color:#ef4444 !important; color:#fff !important; }
+.planned-closure-button { border-color:#d6a100 !important; }
+
+/* Admin one-year audit trail */
 .audit-list { margin-top: 8px; max-height: 420px; overflow-y: auto; border: 1px solid #777; border-radius: 4px; }
 .audit-row { padding: 8px; border-bottom: 1px solid rgba(128,128,128,.35); font-size: 12px; }
 .audit-row:last-child { border-bottom: 0; }
@@ -439,6 +460,9 @@ html, body {
 .audit-head span { opacity:.78; text-align:right; }
 .audit-description { font-weight:600; margin-bottom:3px; }
 .audit-meta { opacity:.72; font-size:11px; overflow-wrap:anywhere; }
+.audit-location { margin-top:7px; padding:7px; border-radius:4px; background:rgba(50,110,165,.14); font-size:11px; overflow-wrap:anywhere; }
+.audit-map-link { display:block; width:max-content; max-width:100%; margin-top:5px; color:#73b9ff; font-weight:700; text-decoration:underline; }
+.audit-map-link:hover { color:#a9d5ff; }
 .audit-empty { padding:12px; opacity:.75; }
 #auditUnitFilter { width:100%; margin:6px 0; }
 
@@ -456,22 +480,95 @@ html, body {
 .audit-badge-warning { background:rgba(214,161,0,.22); }
 .audit-badge-action { background:rgba(199,68,64,.22); }
 .audit-type { font-family:ui-monospace, SFMono-Regular, Consolas, monospace; font-size:10px; opacity:.7; margin-bottom:3px; }
+.audit-range-controls, .audit-export-controls { display:grid; grid-template-columns:1fr; gap:5px; margin:9px 0; padding:8px; border:1px solid rgba(128,128,128,.45); border-radius:4px; }
+.audit-range-controls label, .audit-export-controls label { font-size:11px; font-weight:800; }
+.audit-range-controls input, .audit-export-controls input { width:100%; box-sizing:border-box; }
+.audit-range-status, .audit-storage-status { margin:6px 0; padding:7px; border-radius:4px; background:rgba(50,110,165,.14); font-size:11px; line-height:1.35; }
+.audit-storage-warning { background:rgba(199,68,64,.22); border:1px solid #c74440; color:#ffb8b5; font-weight:800; }
+.audit-pagination { display:flex; align-items:center; justify-content:space-between; gap:7px; margin:8px 0; }
+.audit-pagination button { flex:0 0 auto; width:auto; min-width:80px; }
+.audit-pagination span { flex:1; text-align:center; font-size:11px; font-weight:700; }
+.audit-pagination button:disabled { opacity:.45; cursor:not-allowed; }
+
+.closure-reason-card label { display:block; margin-top:10px; font-size:12px; font-weight:800; }
+.closure-reason-card select, .closure-reason-card textarea { width:100%; box-sizing:border-box; margin-top:4px; }
+.closure-reason-card textarea { resize:vertical; min-height:82px; }
+.closure-reason-error { min-height:20px; margin:8px 0; color:#ffb8b5; font-weight:700; font-size:12px; }
 
 
-/* v1.1.8 external GPS health panel */
-.serial-health {
-  margin-top: 8px;
-  padding: 8px;
-  background: #151515;
-  border: 1px solid #333;
-  border-left: 4px solid #6c8ebf;
-  font-size: 11px;
-  line-height: 1.45;
-  white-space: pre-wrap;
-  word-break: break-word;
+/* ================================================================
+   v1.1.18 — Simplified field GPS interface
+   Detailed receiver data is available on demand instead of occupying
+   the working sidebar.
+   ================================================================ */
+.gps-details-panel {
+  margin: 7px 0 10px;
+  border: 1px solid rgba(128,128,128,.42);
+  border-radius: 5px;
+  overflow: hidden;
+  background: rgba(128,128,128,.06);
 }
 
-body.dark .serial-health {
-  background: #0d0d0d;
-  color: #e6e6e6;
+.gps-details-panel > summary {
+  cursor: pointer;
+  padding: 8px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  user-select: none;
+  list-style-position: inside;
+}
+
+.gps-details-panel > summary[data-state="good"] { color: #2f9d55; }
+.gps-details-panel > summary[data-state="warn"] { color: #b47b13; }
+.gps-details-panel > summary[data-state="bad"] { color: inherit; opacity: .78; }
+
+body.dark .gps-details-panel > summary[data-state="good"] { color: #85d99d; }
+body.dark .gps-details-panel > summary[data-state="warn"] { color: #e0ba67; }
+
+.gps-details-body {
+  padding: 0 9px 9px;
+  border-top: 1px solid rgba(128,128,128,.25);
+}
+
+.gps-details-panel .receiver-health {
+  margin: 8px 0 0;
+  padding: 8px 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.gps-details-panel .receiver-health-title {
+  margin: 0 0 5px;
+  color: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0;
+  opacity: .72;
+}
+
+.gps-details-panel .gps-lock-status {
+  margin: 8px 0 0;
+  padding: 7px 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 11px;
+  opacity: .82;
+}
+
+.gps-details-panel #gpsStatus,
+.gps-details-panel #fixDetails {
+  margin-top: 7px;
+  padding: 7px 0 0;
+  border-top: 1px solid rgba(128,128,128,.25);
+  background: transparent !important;
+  color: inherit;
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
 }

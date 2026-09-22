@@ -10,43 +10,22 @@
   <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-database-compat.js"></script>
 
-  <link rel="stylesheet" href="styles.css?v=1.1.12"/>
+  <link rel="stylesheet" href="styles.css?v=1.1.18"/>
 
   <style>
-    /* v1.1.17 map themes are independent from the dark/light CAD interface.
-       Specific selectors intentionally override the legacy body.dark tile filter
-       that may still be present in styles.css on deployed units. */
-    #map.map-theme-light .leaflet-tile-pane img {
+    /* v1.1.18: one unified Normal/Dark mode.
+       The dark map uses the same keyless OpenStreetMap tiles with a local
+       visibility filter, while the interface follows the map mode. */
+    #map .leaflet-tile-pane img {
       filter: none !important;
     }
 
-    #map.map-theme-dark {
+    body.dark #map {
       background: #15191d;
     }
 
-    #map.map-theme-dark .leaflet-tile-pane img {
-      /* Softer contrast than the old filter so minor county roads and labels
-         are not crushed into the black background. */
+    body.dark #map .leaflet-tile-pane img {
       filter: invert(1) hue-rotate(180deg) brightness(1.28) contrast(0.82) saturate(0.68) !important;
-    }
-
-    #map.map-theme-high-contrast .leaflet-tile-pane img {
-      /* Day/rural visibility mode: preserve the native map while making road
-         edges, labels and intersections easier to pick out at a glance. */
-      filter: brightness(1.08) contrast(1.22) saturate(0.82) !important;
-    }
-
-    .map-theme-control {
-      margin: 5px 0 8px;
-    }
-
-    .map-theme-control label {
-      display: block;
-      margin-bottom: 2px;
-      font-size: 11px;
-      font-weight: 800;
-      color: inherit;
-      opacity: .85;
     }
   </style>
 
@@ -76,15 +55,7 @@
     <h3>Gallatin County Sheriff's Office AVL</h3>
 
     <div id="networkStatus" class="network-banner">NETWORK: CHECKING...</div>
-    <button onclick="toggleDarkMode()">Toggle Dark Mode</button>
-    <div class="map-theme-control">
-      <label for="mapTheme">Map Theme</label>
-      <select id="mapTheme" onchange="setMapTheme(this.value)">
-        <option value="light">Light — Standard</option>
-        <option value="dark">Dark — Night</option>
-        <option value="highContrast">High Contrast — Rural Roads</option>
-      </select>
-    </div>
+    <button id="themeToggleButton" onclick="toggleDarkMode()">Dark Map</button>
 
     <input id="unitId" type="hidden" />
     <div id="activeIdentity" class="admin-selected" aria-live="polite">Not logged in</div>
@@ -96,12 +67,19 @@
       <button id="startGpsButton" onclick="connectSerialGPS()">Start GPS</button>
       <button id="stopGpsButton" onclick="disconnectSerialGPS()">Stop GPS</button>
       <button id="selectReceiverButton" onclick="selectSerialGPSReceiver()">Select Receiver</button>
-      <div id="selectedReceiverStatus" class="gps-lock-status" aria-live="polite">No preferred receiver selected.</div>
 
-      <div id="receiverHealth" class="receiver-health" aria-live="polite">
-        <div class="receiver-health-title">EXTERNAL GPS HEALTH</div>
-        <div id="receiverHealthDetails">Receiver not connected.</div>
-      </div>
+      <details id="gpsDetailsPanel" class="gps-details-panel">
+        <summary id="gpsDetailsSummary">GPS Details — Stopped</summary>
+        <div class="gps-details-body">
+          <div id="selectedReceiverStatus" class="gps-lock-status" aria-live="polite">No preferred receiver selected.</div>
+          <div id="receiverHealth" class="receiver-health" aria-live="polite">
+            <div class="receiver-health-title">Receiver Health</div>
+            <div id="receiverHealthDetails">Receiver not connected.</div>
+          </div>
+          <div id="gpsStatus">GPS: Disconnected</div>
+          <div id="fixDetails">Fix details will appear here.</div>
+        </div>
+      </details>
     </div>
 
     <button id="logoutButton" class="mode-hidden" onclick="logout()">Logout</button>
@@ -118,10 +96,7 @@
 
     <div id="unitList"></div>
 
-    <div id="gpsStatus">GPS: Disconnected</div>
-    <div id="fixDetails">Fix details will appear here.</div>
-
-    <div class="app-version">GCSO AVL v1.1.17 · Build 2026-09-22</div>
+    <div class="app-version">GCSO AVL v1.1.18 · Build 2026-09-22</div>
 
     <div id="developerPanel" class="admin-only mode-hidden">
       <div class="section-title">DEVELOPER PANEL</div>
@@ -193,6 +168,6 @@
   </div>
 </div>
 
-<script src="app.js?v=1.1.17-20260922"></script>
+<script src="app.js?v=1.1.18-20260922"></script>
 </body>
 </html>

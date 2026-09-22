@@ -20,13 +20,13 @@ const auditMetricsRef = db.ref("auditMetrics");
 /*********************************************************************
  GCSO AVL CONFIGURATION
  --------------------------------------------------------------------
- Version: 1.1.17
+ Version: 1.1.18
  Build: 2026-09-22
 
  Temporary client-side access gate. This is a convenience barrier,
  not strong authentication.
 *********************************************************************/
-const APP_VERSION = "1.1.17";
+const APP_VERSION = "1.1.18";
 const BUILD_DATE = "2026-09-22";
 const USER_PASSWORD = "GCSO123";
 const ADMIN_PASSWORD = "GCSOADMIN123";
@@ -78,16 +78,24 @@ const baseTiles = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.pn
   attribution: '&copy; OpenStreetMap contributors'
 }).addTo(map);
 
-let darkMode = localStorage.getItem("avl_darkMode") === "true";
-let mapTheme = localStorage.getItem("avl_mapTheme") || (darkMode ? "dark" : "light");
-
-const MAP_THEME_NAMES = new Set(["light", "dark", "highContrast"]);
-if (!MAP_THEME_NAMES.has(mapTheme)) mapTheme = darkMode ? "dark" : "light";
+// v1.1.18 uses one setting for both the map and the interface.
+// Migrate a previously selected dark map into the unified dark setting.
+let darkMode = localStorage.getItem("avl_darkMode") === "true" ||
+  localStorage.getItem("avl_mapTheme") === "dark";
 
 function applyDarkMode() {
-  // Interface theme only. Map visibility is controlled independently below.
   document.body.classList.toggle("dark", darkMode);
   localStorage.setItem("avl_darkMode", darkMode ? "true" : "false");
+  localStorage.removeItem("avl_mapTheme");
+
+  const button = document.getElementById("themeToggleButton");
+  if (button) {
+    button.innerText = darkMode ? "Normal Map" : "Dark Map";
+    button.title = darkMode
+      ? "Switch to the normal map and light interface"
+      : "Switch to the dark map and dark interface";
+  }
+
   setTimeout(() => map.invalidateSize(), 100);
 }
 
@@ -96,28 +104,7 @@ function toggleDarkMode() {
   applyDarkMode();
 }
 
-function applyMapTheme() {
-  const mapContainer = map.getContainer();
-  mapContainer.classList.remove("map-theme-light", "map-theme-dark", "map-theme-high-contrast");
-  mapContainer.classList.add(
-    mapTheme === "highContrast" ? "map-theme-high-contrast" : `map-theme-${mapTheme}`
-  );
-
-  const select = document.getElementById("mapTheme");
-  if (select) select.value = mapTheme;
-
-  localStorage.setItem("avl_mapTheme", mapTheme);
-  setTimeout(() => map.invalidateSize(), 100);
-}
-
-function setMapTheme(theme) {
-  if (!MAP_THEME_NAMES.has(theme)) return;
-  mapTheme = theme;
-  applyMapTheme();
-}
-
 applyDarkMode();
-applyMapTheme();
 
 function restoreSavedBaudRate() {
   const baudSelect = document.getElementById("baudRate");
@@ -1924,6 +1911,17 @@ function renderReceiverHealth() {
   const connected = !!serialPort && serialKeepReading;
   const healthClass = connected && packetFresh ? "good" : connected || serialAutoMode ? "warn" : "bad";
   panel.className = `receiver-health ${healthClass}`;
+
+  const summary = document.getElementById("gpsDetailsSummary");
+  if (summary) {
+    const state = connected && packetFresh
+      ? "Connected"
+      : connected || serialAutoMode
+        ? "Connecting"
+        : "Stopped";
+    summary.innerText = `GPS Details — ${state}`;
+    summary.dataset.state = healthClass;
+  }
 
   details.innerText = [
     `Status: ${serialConnectionPhase}`,
