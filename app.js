@@ -20,13 +20,13 @@ const auditMetricsRef = db.ref("auditMetrics");
 /*********************************************************************
  GCSO AVL CONFIGURATION
  --------------------------------------------------------------------
- Version: 1.1.18
+ Version: 1.1.19
  Build: 2026-09-22
 
  Temporary client-side access gate. This is a convenience barrier,
  not strong authentication.
 *********************************************************************/
-const APP_VERSION = "1.1.18";
+const APP_VERSION = "1.1.19";
 const BUILD_DATE = "2026-09-22";
 const USER_PASSWORD = "GCSO123";
 const ADMIN_PASSWORD = "GCSOADMIN123";
@@ -57,6 +57,70 @@ const SERIAL_STALL_MS = 12000;
 const SERIAL_WATCHDOG_MS = 3000;
 const FIREBASE_RECOVERY_MS = 15000;
 const DEBUG = false;
+
+// Optional field-use sound cues. These run only from deliberate user clicks and
+// never block GPS, Firebase, or audit operations. Missing/unplayable files fail
+// silently so the AVL remains fully functional.
+const AVL_FUN_SOUND_ENABLED = true;
+const AVL_FUN_SOUND_VOLUME = 0.72;
+const AVL_SOUND_FILES = {
+  gpsStart: [
+    "audio/gps-start/Start1.wav",
+    "audio/gps-start/Start2.wav",
+    "audio/gps-start/Start3.wav",
+    "audio/gps-start/Start4.wav",
+    "audio/gps-start/Start5.wav",
+    "audio/gps-start/Start6.wav",
+    "audio/gps-start/Start7.wav"
+  ],
+  gpsStop: [
+    "audio/gps-stop/Stop1.wav",
+    "audio/gps-stop/Stop2.wav",
+    "audio/gps-stop/Stop3.wav",
+    "audio/gps-stop/Stop4.wav",
+    "audio/gps-stop/Stop5.wav",
+    "audio/gps-stop/Stop6.wav"
+  ],
+  developer: [
+    "audio/developer/Dev1.wav"
+  ]
+};
+
+let currentAvlFunAudio = null;
+const lastAvlFunSoundIndex = { gpsStart: -1, gpsStop: -1, developer: -1 };
+
+function playAvlFunSound(category) {
+  if (!AVL_FUN_SOUND_ENABLED) return;
+
+  const files = AVL_SOUND_FILES[category];
+  if (!Array.isArray(files) || !files.length) return;
+
+  let index = Math.floor(Math.random() * files.length);
+  if (files.length > 1 && index === lastAvlFunSoundIndex[category]) {
+    index = (index + 1 + Math.floor(Math.random() * (files.length - 1))) % files.length;
+  }
+  lastAvlFunSoundIndex[category] = index;
+
+  try {
+    // Never stack clips on top of each other if someone double-clicks or
+    // starts/stops GPS quickly. The newest deliberate action wins.
+    if (currentAvlFunAudio) {
+      currentAvlFunAudio.pause();
+      currentAvlFunAudio.currentTime = 0;
+    }
+
+    const audio = new Audio(files[index]);
+    currentAvlFunAudio = audio;
+    audio.volume = AVL_FUN_SOUND_VOLUME;
+    audio.preload = "auto";
+    audio.addEventListener("ended", () => {
+      if (currentAvlFunAudio === audio) currentAvlFunAudio = null;
+    }, { once: true });
+    audio.play().catch(err => debugLog("Optional AVL sound unavailable", err));
+  } catch (err) {
+    debugLog("Optional AVL sound unavailable", err);
+  }
+}
 
 
 function debugLog(...args) {
@@ -2182,6 +2246,7 @@ function queueUnitFixForPublish(id, data, options = {}) {
 function toggleDeveloperPanel() {
   if (userRole !== "admin") return alert("Admin access required");
   developerPanelVisible = !developerPanelVisible;
+  if (developerPanelVisible) playAvlFunSound("developer");
   applyModeUi();
   updateDeveloperInfo();
   if (developerPanelVisible) loadAuditTrail(); else stopAuditTrail();
@@ -2578,6 +2643,9 @@ async function connectSerialGPS(isRetry = false) {
   localStorage.setItem("avl_unitId", id);
   localStorage.setItem("avl_mode", userMode || "unit");
 
+  // User-initiated Start GPS sound. Automatic retry attempts stay silent.
+  if (!isRetry) playAvlFunSound("gpsStart");
+
   serialAutoMode = true;
   if (!isRetry) {
     serialForceBaudScan = false;
@@ -2853,6 +2921,11 @@ async function probePortForNmea(port, baudRate, probeMs, attemptGeneration) {
 //////////////////////////////////////////////////////
 
 async function disconnectSerialGPS(manual = true, options = {}) {
+  // Only the deliberate Stop GPS action gets a sound. Internal reconnects and
+  // logout/session cleanup remain silent. Keep this before the first await so
+  // browser audio permission is satisfied by the user's click.
+  if (manual && !options.endSession) playAvlFunSound("gpsStop");
+
   if (manual) {
     serialAutoMode = false;
     serialConnectGeneration += 1;
