@@ -10,7 +10,45 @@
   <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-database-compat.js"></script>
 
-  <link rel="stylesheet" href="styles.css?v=1.1.9"/>
+  <link rel="stylesheet" href="styles.css?v=1.1.12"/>
+
+  <style>
+    /* v1.1.17 map themes are independent from the dark/light CAD interface.
+       Specific selectors intentionally override the legacy body.dark tile filter
+       that may still be present in styles.css on deployed units. */
+    #map.map-theme-light .leaflet-tile-pane img {
+      filter: none !important;
+    }
+
+    #map.map-theme-dark {
+      background: #15191d;
+    }
+
+    #map.map-theme-dark .leaflet-tile-pane img {
+      /* Softer contrast than the old filter so minor county roads and labels
+         are not crushed into the black background. */
+      filter: invert(1) hue-rotate(180deg) brightness(1.28) contrast(0.82) saturate(0.68) !important;
+    }
+
+    #map.map-theme-high-contrast .leaflet-tile-pane img {
+      /* Day/rural visibility mode: preserve the native map while making road
+         edges, labels and intersections easier to pick out at a glance. */
+      filter: brightness(1.08) contrast(1.22) saturate(0.82) !important;
+    }
+
+    .map-theme-control {
+      margin: 5px 0 8px;
+    }
+
+    .map-theme-control label {
+      display: block;
+      margin-bottom: 2px;
+      font-size: 11px;
+      font-weight: 800;
+      color: inherit;
+      opacity: .85;
+    }
+  </style>
 
 </head>
 
@@ -38,40 +76,35 @@
     <h3>Gallatin County Sheriff's Office AVL</h3>
 
     <div id="networkStatus" class="network-banner">NETWORK: CHECKING...</div>
-    <button onclick="toggleDarkMode()">Toggle Interface Dark Mode</button>
+    <button onclick="toggleDarkMode()">Toggle Dark Mode</button>
+    <div class="map-theme-control">
+      <label for="mapTheme">Map Theme</label>
+      <select id="mapTheme" onchange="setMapTheme(this.value)">
+        <option value="light">Light — Standard</option>
+        <option value="dark">Dark — Night</option>
+        <option value="highContrast">High Contrast — Rural Roads</option>
+      </select>
+    </div>
 
-    <label for="mapTheme">Map Theme</label>
-    <select id="mapTheme" onchange="setMapTheme(this.value)">
-      <option value="light">Light — Maximum Detail</option>
-      <option value="dark">Dark — Night</option>
-      <option value="highContrast">High Contrast — Rural / Night</option>
-    </select>
-
-    <input id="unitId" placeholder="Unit ID / Dispatch Name" />
+    <input id="unitId" type="hidden" />
+    <div id="activeIdentity" class="admin-selected" aria-live="polite">Not logged in</div>
 
     <div id="unitGpsControls">
       <hr>
 
-      <label>Baud Rate</label>
-      <select id="baudRate">
-        <option value="4800">4800</option>
-        <option value="9600" selected>9600</option>
-        <option value="38400">38400</option>
-        <option value="115200">115200</option>
-      </select>
+      <div class="section-title">GPS CONTROLS</div>
+      <button id="startGpsButton" onclick="connectSerialGPS()">Start GPS</button>
+      <button id="stopGpsButton" onclick="disconnectSerialGPS()">Stop GPS</button>
+      <button id="selectReceiverButton" onclick="selectSerialGPSReceiver()">Select Receiver</button>
+      <div id="selectedReceiverStatus" class="gps-lock-status" aria-live="polite">No preferred receiver selected.</div>
 
-      <button onclick="connectSerialGPS()">Auto Detect External GPS</button>
-      <button onclick="grantSerialGPSPermission()">Grant GPS Permission / Add Receiver</button>
-      <button onclick="disconnectSerialGPS()">Disconnect External GPS</button>
-      <button onclick="startBrowserGPS()">Start Browser GPS Fallback</button>
-      <button onclick="centerOnUnit()">Center On My Unit</button>
-
-      <hr>
-
-      <button onclick="logOffUnit()">Log Off My Unit</button>
+      <div id="receiverHealth" class="receiver-health" aria-live="polite">
+        <div class="receiver-health-title">EXTERNAL GPS HEALTH</div>
+        <div id="receiverHealthDetails">Receiver not connected.</div>
+      </div>
     </div>
 
-    <button onclick="logout()">Logout</button>
+    <button id="logoutButton" class="mode-hidden" onclick="logout()">Logout</button>
 
     <div id="adminControls" class="admin-only mode-hidden">
       <hr>
@@ -86,10 +119,9 @@
     <div id="unitList"></div>
 
     <div id="gpsStatus">GPS: Disconnected</div>
-    <div id="serialHealth" class="serial-health">External GPS diagnostics will appear here.</div>
     <div id="fixDetails">Fix details will appear here.</div>
 
-    <div class="app-version">GCSO AVL v1.1.9 · Build 2026-09-22</div>
+    <div class="app-version">GCSO AVL v1.1.17 · Build 2026-09-22</div>
 
     <div id="developerPanel" class="admin-only mode-hidden">
       <div class="section-title">DEVELOPER PANEL</div>
@@ -97,7 +129,17 @@
       <div id="developerInfo">Diagnostics loading...</div>
       <div id="rawNmea">Raw NMEA will appear here.</div>
       <hr>
-      <div class="section-title">FIVE-DAY AUDIT TRAIL</div>
+      <div class="section-title">ONE-YEAR AUDIT TRAIL</div>
+      <div class="audit-range-controls">
+        <label for="auditStartDate">Start date</label>
+        <input id="auditStartDate" type="date">
+        <label for="auditEndDate">End date</label>
+        <input id="auditEndDate" type="date">
+        <button onclick="loadAuditTrail()">Load Date Range</button>
+        <button onclick="setDefaultAuditRange(true); loadAuditTrail();">Last 7 Days</button>
+      </div>
+      <div id="auditRangeStatus" class="audit-range-status">Select up to 31 days at a time.</div>
+      <div id="auditStorageStatus" class="audit-storage-status">Calculating audit storage estimate…</div>
       <div class="audit-filters">
         <label for="auditUnitFilter">Unit / user</label>
         <select id="auditUnitFilter" onchange="filterAuditTrail()">
@@ -120,6 +162,17 @@
         </select>
       </div>
       <div id="auditTrailList" class="audit-list">Audit events loading...</div>
+      <div class="audit-pagination">
+        <button id="auditPreviousPage" onclick="changeAuditPage(-1)">Previous</button>
+        <span id="auditPageLabel">Page 1 of 1</span>
+        <button id="auditNextPage" onclick="changeAuditPage(1)">Next</button>
+      </div>
+      <div class="audit-export-controls">
+        <label for="auditExportMonth">Monthly archive</label>
+        <input id="auditExportMonth" type="month">
+        <button onclick="exportAuditMonth('json')">Export Month JSON</button>
+        <button onclick="exportAuditMonth('csv')">Export Month CSV</button>
+      </div>
     </div>
   </div>
 
@@ -140,6 +193,6 @@
   </div>
 </div>
 
-<script src="app.js?v=1.1.9"></script>
+<script src="app.js?v=1.1.17-20260922"></script>
 </body>
 </html>
