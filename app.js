@@ -20,13 +20,13 @@ const auditMetricsRef = db.ref("auditMetrics");
 /*********************************************************************
  GCSO AVL CONFIGURATION
  --------------------------------------------------------------------
- Version: 1.1.19
+ Version: 1.1.20
  Build: 2026-09-22
 
  Temporary client-side access gate. This is a convenience barrier,
  not strong authentication.
 *********************************************************************/
-const APP_VERSION = "1.1.19";
+const APP_VERSION = "1.1.20";
 const BUILD_DATE = "2026-09-22";
 const USER_PASSWORD = "GCSO123";
 const ADMIN_PASSWORD = "GCSOADMIN123";
@@ -2397,13 +2397,37 @@ function cancelActiveSerialProbe() {
   if (serialProbeReader) serialProbeReader.cancel().catch(() => {});
 }
 
-function getBaudCandidates(excludedBaud = null) {
+function getBaudCandidates(deprioritizedBaud = null) {
   const baudSelect = document.getElementById("baudRate");
   const selected = parseInt(baudSelect?.value || localStorage.getItem("avl_lastBaudRate"), 10) || 4800;
   localStorage.setItem("avl_lastBaudRate", String(selected));
-  return [selected, ...SERIAL_BAUD_RATES]
-    .filter((v, i, arr) => arr.indexOf(v) === i)
-    .filter((v) => v !== excludedBaud);
+
+  const candidates = [selected, ...SERIAL_BAUD_RATES]
+    .filter((v, i, arr) => arr.indexOf(v) === i);
+
+  // A framing/parity error often means the receiver is open at the wrong baud.
+  // Try every alternate rate first, but keep the previous rate as a final retry
+  // in case the error was a transient USB/driver hiccup rather than a mismatch.
+  if (deprioritizedBaud && candidates.includes(deprioritizedBaud)) {
+    return [
+      ...candidates.filter((v) => v !== deprioritizedBaud),
+      deprioritizedBaud
+    ];
+  }
+
+  return candidates;
+}
+
+function isSerialFramingClassError(err) {
+  const text = `${err?.name || ""} ${err?.message || err || ""}`.toLowerCase();
+  return (
+    text.includes("framing") ||
+    text.includes("parity") ||
+    text.includes("buffer overrun") ||
+    text.includes("bufferoverrun") ||
+    text.includes("break error") ||
+    text.includes("breakerror")
+  );
 }
 
 function looksLikeNMEA(sentence) {
@@ -3057,10 +3081,30 @@ async function readSerialLoop(activePort, readGeneration) {
     }
   } catch (err) {
     if (!isCurrentRead()) return;
-    console.error(err);
-    serialConnectionPhase = `Serial read error: ${err.message}`;
-    setStatus("External GPS read error: " + err.message, "bad");
-    writeAuditEvent("serial_read_error", `External GPS data stream error: ${err.message}`, { source: "system", severity: "warning", reason: err.message });
+
+    const framingClassError = isSerialFramingClassError(err);
+    if (framingClassError && currentSerialBaud) {
+      // Chrome/Web Serial reports FramingError when UART settings do not match
+      // the incoming stream (most commonly a stale/wrong baud), and it can also
+      // occur after a USB/driver hiccup. Do not reopen the same setting forever.
+      // Force the next recovery pass to validate alternate baud rates first.
+      serialForceBaudScan = true;
+      serialFailedBaud = currentSerialBaud;
+      serialBuffer = "";
+      serialConnectionPhase = `Serial framing error at ${currentSerialBaud} baud — checking alternate baud rates`;
+      setStatus(`GPS serial framing error at ${currentSerialBaud} baud. Checking alternate baud rates...`, "warn");
+      addDiagnosticEvent(`Serial framing error @ ${currentSerialBaud} baud; alternate-rate recovery started`);
+      writeAuditEvent(
+        "serial_framing_error",
+        `External GPS framing/line error at ${currentSerialBaud} baud; automatic alternate-baud recovery started`,
+        { source: "automatic", severity: "warning", reason: err.message }
+      );
+    } else {
+      console.error(err);
+      serialConnectionPhase = `Serial read error: ${err.message}`;
+      setStatus("External GPS read error: " + err.message, "bad");
+      writeAuditEvent("serial_read_error", `External GPS data stream error: ${err.message}`, { source: "system", severity: "warning", reason: err.message });
+    }
   } finally {
     // A stale read loop from before undocking must not touch the newly opened
     // replacement port. Only the generation that still owns activePort may
@@ -3076,7 +3120,13 @@ async function readSerialLoop(activePort, readGeneration) {
     if (!serialDeviceMissing) {
       writeAuditEvent("serial_unexpected_disconnect", "External GPS connection/data stream ended unexpectedly; automatic reconnect started", { source: "system", severity: "warning" });
     }
-    scheduleSerialRescan(serialDeviceMissing ? "Waiting for docked GPS receiver" : "External GPS lost");
+    scheduleSerialRescan(
+      serialDeviceMissing
+        ? "Waiting for docked GPS receiver"
+        : (serialForceBaudScan ? "GPS serial framing mismatch detected" : "External GPS lost"),
+      serialForceBaudScan ? 1200 : GPS_RESCAN_MS,
+      serialForceBaudScan
+    );
   }
 }
 
