@@ -10,7 +10,7 @@
   <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-database-compat.js"></script>
 
-  <link rel="stylesheet" href="styles.css?v=1.1.20"/>
+  <link rel="stylesheet" href="styles.css?v=1.1.21"/>
 
   <style>
     /* v1.1.18: one unified Normal/Dark mode.
@@ -67,6 +67,7 @@
       <button id="startGpsButton" onclick="connectSerialGPS()">Start GPS</button>
       <button id="stopGpsButton" onclick="disconnectSerialGPS()">Stop GPS</button>
       <button id="selectReceiverButton" onclick="selectSerialGPSReceiver()">Select Receiver</button>
+      <button id="windowsLocationButton" onclick="startBrowserGPS()">Use Windows Location</button>
 
       <details id="gpsDetailsPanel" class="gps-details-panel">
         <summary id="gpsDetailsSummary">GPS Details — Stopped</summary>
@@ -96,7 +97,7 @@
 
     <div id="unitList"></div>
 
-    <div class="app-version">GCSO AVL v1.1.20 · Build 2026-09-22</div>
+    <div class="app-version">GCSO AVL v1.1.21 · Build 2026-10-05</div>
 
     <div id="developerPanel" class="admin-only mode-hidden">
       <div class="section-title">DEVELOPER PANEL</div>
@@ -168,6 +169,6 @@
   </div>
 </div>
 
-<script src="app.js?v=1.1.20-20260922"></script>
+<script src="app.js?v=1.1.21-20261005"></script>
 </body>
 </html>

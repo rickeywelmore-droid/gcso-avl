@@ -20,13 +20,13 @@ const auditMetricsRef = db.ref("auditMetrics");
 /*********************************************************************
  GCSO AVL CONFIGURATION
  --------------------------------------------------------------------
- Version: 1.1.20
+ Version: 1.1.21
  Build: 2026-09-22
 
  Temporary client-side access gate. This is a convenience barrier,
  not strong authentication.
 *********************************************************************/
-const APP_VERSION = "1.1.20";
+const APP_VERSION = "1.1.21";
 const BUILD_DATE = "2026-09-22";
 const USER_PASSWORD = "GCSO123";
 const ADMIN_PASSWORD = "GCSOADMIN123";
@@ -4031,7 +4031,7 @@ function configureRosterDataSubscriptions() {
   stopDispatchRosterSubscription();
 }
 //////////////////////////////////////////////////////
-// BROWSER GPS FALLBACK
+// WINDOWS LOCATION / BROWSER GEOLOCATION
 //////////////////////////////////////////////////////
 
 function startBrowserGPS() {
@@ -4067,21 +4067,21 @@ function startBrowserGPS() {
 
     if (!browserGpsConnectedLogged) {
       browserGpsConnectedLogged = true;
-      writeAuditEvent("browser_gps_connected", "GPS STREAM STARTED HERE — Browser GPS fallback produced its first valid position", {
+      writeAuditEvent("browser_gps_connected", "GPS STREAM STARTED HERE — Windows Location produced its first valid position", {
         source: "user",
         severity: "action",
-        buttonLabel: "Start Browser GPS Fallback",
+        buttonLabel: "Use Windows Location",
         controlLocation: "GPS controls",
         includeLocation: true,
         locationData: data
       });
     }
 
-    setStatus("Browser GPS active", "good");
-    if (!lastFix || lastFix.gpsSource !== "browser") addDiagnosticEvent("Browser GPS fallback active");
+    setStatus("Windows Location active", "good");
+    if (!lastFix || lastFix.gpsSource !== "browser") addDiagnosticEvent("Windows Location active");
 
   }, (err) => {
-    setStatus("Browser GPS error: " + err.message, "bad");
+    setStatus("Windows Location error: " + err.message, "bad");
   }, {
     enableHighAccuracy: true,
     maximumAge: 0,
