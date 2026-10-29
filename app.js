@@ -20,14 +20,14 @@ const auditMetricsRef = db.ref("auditMetrics");
 /*********************************************************************
  GCSO AVL CONFIGURATION
  --------------------------------------------------------------------
- Version: 1.1.21
- Build: 2026-09-22
+ Version: 1.1.22
+ Build: 2026-10-28
 
  Temporary client-side access gate. This is a convenience barrier,
  not strong authentication.
 *********************************************************************/
-const APP_VERSION = "1.1.21";
-const BUILD_DATE = "2026-09-22";
+const APP_VERSION = "1.1.22";
+const BUILD_DATE = "2026-10-28";
 const USER_PASSWORD = "GCSO123";
 const ADMIN_PASSWORD = "GCSOADMIN123";
 const PRESENCE_TIMEOUT_MINUTES = 2;
@@ -191,6 +191,11 @@ let currentUnitId = null;
 let currentSessionKey = null;
 let userMode = "unit";
 let browserWatchId = null;
+let excaliburEventSource = null;
+let excaliburGpsActive = false;
+let excaliburGpsConnectedLogged = false;
+let excaliburLastHeartbeatTime = 0;
+const EXCALIBUR_LOCAL_SOURCE_URL = "http://127.0.0.1:8765/stream";
 let browserGpsConnectedLogged = false;
 let presenceTimer = null;
 let latestUnits = {};
@@ -1972,7 +1977,7 @@ function renderReceiverHealth() {
   if (!panel || !details) return;
 
   const packetFresh = !!lastNmeaPacketTime && (Date.now() - lastNmeaPacketTime) <= SERIAL_STALL_MS;
-  const connected = !!serialPort && serialKeepReading;
+  const connected = excaliburGpsActive || (!!serialPort && serialKeepReading);
   const healthClass = connected && packetFresh ? "good" : connected || serialAutoMode ? "warn" : "bad";
   panel.className = `receiver-health ${healthClass}`;
 
@@ -1991,8 +1996,8 @@ function renderReceiverHealth() {
     `Status: ${serialConnectionPhase}`,
     `Receiver: ${currentSerialLabel}`,
     `Port ID: ${currentSerialPortId}`,
-    `Baud: ${currentSerialBaud || "Not detected"}`,
-    `Stream: ${packetFresh ? "Receiving" : connected ? "Waiting for NMEA" : "Not receiving"}`,
+    `Baud: ${excaliburGpsActive ? "Managed by Excalibur" : (currentSerialBaud || "Not detected")}`,
+    `Stream: ${packetFresh ? "Receiving" : connected ? "Waiting for GPS" : "Not receiving"}`,
     `Last sentence: ${lastNmeaSentenceType}`,
     `Last packet: ${formatPacketAge(lastNmeaPacketTime)}`,
     `Fix: ${formatFixQuality(serialFixQuality)}`,
@@ -2532,6 +2537,163 @@ if ("serial" in navigator) {
 }
 
 //////////////////////////////////////////////////////
+// EXCALIBUR PASSIVE LOCAL GPS SOURCE
+//////////////////////////////////////////////////////
+
+function stopExcaliburGpsSource() {
+  const wasActive = excaliburGpsActive || !!excaliburEventSource;
+  if (excaliburEventSource) {
+    try { excaliburEventSource.close(); } catch (_) {}
+  }
+  excaliburEventSource = null;
+  excaliburGpsActive = false;
+  excaliburGpsConnectedLogged = false;
+  excaliburLastHeartbeatTime = 0;
+  return wasActive;
+}
+
+function handleExcaliburFixPayload(payload, id) {
+  if (!payload || !payload.valid) {
+    serialConnectionPhase = payload?.receiverConnected
+      ? "Excalibur connected - waiting for valid GPS fix"
+      : "Excalibur connected - receiver not connected";
+    renderReceiverHealth();
+    return;
+  }
+
+  const lat = Number(payload.lat);
+  const lon = Number(payload.lon);
+  if (!isValidLatLon(lat, lon)) return;
+
+  const data = {
+    lat,
+    lon,
+    speed: Number(payload.speed || 0),
+    heading: Number(payload.heading || 0),
+    acc: Number(payload.acc || 10),
+    gpsSource: "serial-excalibur",
+    satellites: Number(payload.satellites || 0),
+    hdop: Number(payload.hdop || 0),
+    gpsTime: Number(payload.gpsTime || Date.now())
+  };
+
+  lastFix = data;
+  lastFixUnitId = id;
+  lastValidFixTime = data.gpsTime;
+  lastNmeaPacketTime = Date.now();
+  lastNmeaSentenceType = payload.sourceSentence || "Excalibur";
+  serialFixQuality = Number(payload.fixQuality || 0);
+  serialSatellites = Number(payload.satellites || 0);
+  serialHdop = Number(payload.hdop || 0);
+  currentSerialLabel = "Excalibur GPS";
+  currentSerialPortId = "127.0.0.1:8765";
+  currentSerialBaud = null;
+  serialConnectionPhase = "Excalibur local GPS source active";
+
+  queueUnitFixForPublish(id, data, { reason: "excalibur_gps" });
+  updateMap(id, data);
+
+  if (!excaliburGpsConnectedLogged) {
+    excaliburGpsConnectedLogged = true;
+    writeAuditEvent("excalibur_gps_connected", "GPS STREAM STARTED HERE - Excalibur GPS produced its first valid position", {
+      source: "user",
+      severity: "action",
+      buttonLabel: "Start GPS",
+      controlLocation: "GPS controls",
+      includeLocation: true,
+      locationData: data
+    });
+    addDiagnosticEvent("Excalibur GPS local source connected");
+  }
+
+  setStatus("Excalibur GPS active", "good");
+  setFixDetails(
+    `GPS Source: Excalibur GPS\n` +
+    `Receiver: ${payload.receiverPort || "Managed by Excalibur"}\n` +
+    `Fix: valid\n` +
+    `Satellites: ${data.satellites || "Waiting"}\n` +
+    `HDOP: ${data.hdop || "Waiting"}`
+  );
+  renderReceiverHealth();
+}
+
+function tryConnectExcaliburGpsSource(id, isRetry = false) {
+  if (isRetry || typeof EventSource === "undefined") return Promise.resolve(false);
+
+  stopExcaliburGpsSource();
+  serialAutoMode = false;
+  serialConnectionPhase = "Checking for Excalibur GPS on this computer";
+  setStatus("Checking Excalibur GPS local source...", "warn");
+  renderReceiverHealth();
+
+  return new Promise((resolve) => {
+    let settled = false;
+    let opened = false;
+    let source = null;
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (!ok && source) {
+        try { source.close(); } catch (_) {}
+        if (excaliburEventSource === source) excaliburEventSource = null;
+      }
+      resolve(ok);
+    };
+
+    try {
+      source = new EventSource(`${EXCALIBUR_LOCAL_SOURCE_URL}?v=${Date.now()}`);
+      excaliburEventSource = source;
+    } catch (_) {
+      finish(false);
+      return;
+    }
+
+    const timeout = setTimeout(() => {
+      if (!opened) finish(false);
+    }, 15000);
+
+    source.onopen = () => {
+      opened = true;
+      excaliburGpsActive = true;
+      currentSerialLabel = "Excalibur GPS";
+      currentSerialPortId = "127.0.0.1:8765";
+      currentSerialBaud = null;
+      serialConnectionPhase = "Excalibur local source connected - waiting for GPS fix";
+      setStatus("Excalibur GPS connected - waiting for position", "good");
+      renderReceiverHealth();
+      finish(true);
+    };
+
+    source.addEventListener("fix", (event) => {
+      try { handleExcaliburFixPayload(JSON.parse(event.data), id); }
+      catch (err) { console.warn("Invalid Excalibur GPS payload:", err); }
+    });
+
+    source.addEventListener("heartbeat", (event) => {
+      excaliburLastHeartbeatTime = Date.now();
+      try {
+        const heartbeat = JSON.parse(event.data);
+        if (!heartbeat.receiverConnected && excaliburGpsActive) {
+          serialConnectionPhase = "Excalibur is running - physical GPS receiver released";
+          renderReceiverHealth();
+        }
+      } catch (_) {}
+    });
+
+    source.onerror = () => {
+      if (!opened) {
+        finish(false);
+        return;
+      }
+      serialConnectionPhase = "Excalibur local source reconnecting";
+      setStatus("Excalibur GPS connection interrupted - reconnecting...", "warn");
+      renderReceiverHealth();
+    };
+  });
+}
+
+//////////////////////////////////////////////////////
 // SELECT THE AUTHORITATIVE GPS RECEIVER
 //////////////////////////////////////////////////////
 
@@ -2652,23 +2814,29 @@ async function connectSerialGPS(isRetry = false) {
   const id = document.getElementById("unitId").value.trim();
   if (!id) return alert("Enter Unit ID first");
 
-  if (!("serial" in navigator)) {
-    alert("Web Serial is not supported in this browser. Use Chrome or Edge.");
-    return;
-  }
-
-  if (!localStorage.getItem("avl_preferredGpsSignature")) {
-    setStatus("Select a GPS receiver before starting GPS.", "warn");
-    if (!isRetry) alert("Press Select Receiver and choose the GPS dongle this unit should use.");
-    return;
-  }
-
   currentUnitId = id;
   localStorage.setItem("avl_unitId", id);
   localStorage.setItem("avl_mode", userMode || "unit");
 
   // User-initiated Start GPS sound. Automatic retry attempts stay silent.
   if (!isRetry) playAvlFunSound("gpsStart");
+
+  // Excalibur is the preferred source. It owns the physical COM port and
+  // passively provides positions to the existing AVL Start/Stop controls.
+  const excaliburConnected = await tryConnectExcaliburGpsSource(id, isRetry);
+  if (excaliburConnected) return;
+
+  // Legacy direct-COM fallback remains available if Excalibur is not running.
+  if (!("serial" in navigator)) {
+    alert("Excalibur GPS was not available and Web Serial is not supported in this browser. Use Chrome or Edge.");
+    return;
+  }
+
+  if (!localStorage.getItem("avl_preferredGpsSignature")) {
+    setStatus("Excalibur GPS was not available. Select a direct GPS receiver for fallback.", "warn");
+    if (!isRetry) alert("Excalibur GPS is not available. Press Select Receiver to use the legacy direct-COM fallback.");
+    return;
+  }
 
   serialAutoMode = true;
   if (!isRetry) {
@@ -2950,6 +3118,8 @@ async function disconnectSerialGPS(manual = true, options = {}) {
   // browser audio permission is satisfied by the user's click.
   if (manual && !options.endSession) playAvlFunSound("gpsStop");
 
+  const excaliburWasActive = stopExcaliburGpsSource();
+
   if (manual) {
     serialAutoMode = false;
     serialConnectGeneration += 1;
@@ -2995,7 +3165,7 @@ async function disconnectSerialGPS(manual = true, options = {}) {
       serialOpenedTime = 0;
       lastNmeaPacketTime = 0;
       lastNmeaSentenceType = "None";
-      addDiagnosticEvent("External GPS disconnected");
+      addDiagnosticEvent(excaliburWasActive ? "Excalibur GPS disconnected" : "External GPS disconnected");
       const endingSession = !!options.endSession;
       const stoppedUnitId = currentUnitId;
       writeAuditEvent(
@@ -3582,6 +3752,7 @@ function getUnitHealthLabel(data) {
 
 function formatGpsSource(source) {
   if (!source) return "unknown";
+  if (source === "serial-excalibur") return "Excalibur GPS";
   if (source.startsWith("serial")) return "External GPS";
   if (source === "browser") return "Browser fallback";
   return source;
