@@ -1252,7 +1252,7 @@ function applyModeUi() {
   const logoutButton = document.getElementById("logoutButton");
 
   if (gpsControls) gpsControls.classList.toggle("mode-hidden", userMode === "dispatch");
-  if (logoutButton) logoutButton.classList.toggle("mode-hidden", userMode !== "dispatch");
+  if (logoutButton) logoutButton.classList.toggle("mode-hidden", !currentUnitId);
   if (activeIdentity) {
     const identityType = userMode === "dispatch" ? "Dispatcher" : "Unit";
     activeIdentity.textContent = currentUnitId ? `${identityType}: ${currentUnitId}` : "Not logged in";
