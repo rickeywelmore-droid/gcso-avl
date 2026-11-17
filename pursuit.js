@@ -1314,24 +1314,318 @@ const data=${safeJson};
 </html>`;
 }
 
-async function openPursuitReport() {
-  const reportWindow = window.open("", "_blank");
-  if (!reportWindow) {
-    alert("Allow pop-ups for the AVL site to open the pursuit report.");
-    return;
-  }
-  reportWindow.document.write("<p style='font-family:Arial;padding:20px'>Building pursuit report…</p>");
+let pursuitReportMapInstance = null;
 
+function ensurePursuitReportViewStyles() {
+  if (document.getElementById("pursuitReportViewStyles")) return;
+
+  const style = document.createElement("style");
+  style.id = "pursuitReportViewStyles";
+  style.textContent = `
+    #pursuitReportOverlay {
+      position: fixed;
+      inset: 0;
+      z-index: 20000;
+      overflow: auto;
+      background: #fff;
+      color: #111;
+      font-family: Arial, sans-serif;
+    }
+    #pursuitReportOverlay .report-shell {
+      width: min(1100px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 18px 0 36px;
+    }
+    #pursuitReportOverlay .report-actions {
+      position: sticky;
+      top: 0;
+      z-index: 1001;
+      display: flex;
+      gap: 8px;
+      padding: 10px 0;
+      background: rgba(255,255,255,.96);
+      border-bottom: 1px solid #bbb;
+    }
+    #pursuitReportOverlay .report-actions button {
+      width: auto;
+      padding: 8px 14px;
+      margin: 0;
+    }
+    #pursuitReportOverlay h1 { margin: 18px 0 4px; }
+    #pursuitReportOverlay h2 {
+      margin-top: 24px;
+      border-bottom: 2px solid #333;
+      padding-bottom: 5px;
+    }
+    #pursuitReportOverlay .report-meta {
+      display: grid;
+      grid-template-columns: 180px 1fr;
+      gap: 5px 12px;
+      margin: 18px 0;
+    }
+    #pursuitReportOverlay .report-notice {
+      margin: 14px 0;
+      padding: 10px;
+      background: #fff5cc;
+      border-left: 4px solid #c78f00;
+      font-size: 12px;
+    }
+    #pursuitReportMap {
+      height: 520px;
+      border: 1px solid #777;
+      margin: 12px 0;
+      background: #eee;
+    }
+    #pursuitReportOverlay table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+    #pursuitReportOverlay th,
+    #pursuitReportOverlay td {
+      border: 1px solid #bbb;
+      padding: 6px;
+      text-align: left;
+    }
+    #pursuitReportOverlay th { background: #eee; }
+
+    @media print {
+      body.pursuit-report-printing > *:not(#pursuitReportOverlay) {
+        display: none !important;
+      }
+      body.pursuit-report-printing #pursuitReportOverlay {
+        position: static !important;
+        overflow: visible !important;
+      }
+      body.pursuit-report-printing #pursuitReportOverlay .report-shell {
+        width: 100% !important;
+        padding: 0 !important;
+      }
+      body.pursuit-report-printing #pursuitReportOverlay .report-actions {
+        display: none !important;
+      }
+      body.pursuit-report-printing #pursuitReportMap {
+        height: 360px !important;
+      }
+      body.pursuit-report-printing #pursuitReportOverlay h1 {
+        font-size: 24px;
+      }
+      body.pursuit-report-printing #pursuitReportOverlay h2 {
+        font-size: 18px;
+        margin-top: 16px;
+      }
+      body.pursuit-report-printing #pursuitReportOverlay .report-meta {
+        margin: 10px 0;
+        gap: 3px 10px;
+      }
+      body.pursuit-report-printing #pursuitReportOverlay .report-notice {
+        margin: 8px 0;
+        padding: 7px;
+        font-size: 10px;
+      }
+      body.pursuit-report-printing #pursuitReportOverlay table {
+        font-size: 10px;
+      }
+      body.pursuit-report-printing #pursuitReportOverlay th,
+      body.pursuit-report-printing #pursuitReportOverlay td {
+        padding: 4px;
+      }
+      body.pursuit-report-printing .leaflet-control-zoom {
+        display: none !important;
+      }
+    }
+  `;
+  document.head.appendChild(style);
+}
+
+function closePursuitReportView() {
+  if (pursuitReportMapInstance) {
+    try { pursuitReportMapInstance.remove(); } catch (_) {}
+    pursuitReportMapInstance = null;
+  }
+  const overlay = document.getElementById("pursuitReportOverlay");
+  if (overlay) overlay.remove();
+  document.body.classList.remove("pursuit-report-printing");
+}
+
+function printPursuitReportView() {
+  document.body.classList.add("pursuit-report-printing");
+  if (pursuitReportMapInstance) {
+    setTimeout(() => pursuitReportMapInstance.invalidateSize(), 50);
+  }
+  setTimeout(() => window.print(), 250);
+}
+
+window.addEventListener("afterprint", () => {
+  document.body.classList.remove("pursuit-report-printing");
+  if (pursuitReportMapInstance) {
+    setTimeout(() => pursuitReportMapInstance.invalidateSize(), 50);
+  }
+});
+
+function buildPursuitReportViewMarkup(record) {
+  const meta = record.meta || {};
+  const units = normalizedPursuitUnits(record);
+  const events = normalizedPursuitEvents(record);
+  const start = Number(meta.startedAt || meta.startedAtClient || 0);
+  const end = Number(meta.endedAt || meta.endedAtClient || Date.now());
+  const duration = end && start ? pursuitFormatDuration(end - start) : "Unknown";
+
+  const summaryRows = units.map(unit => {
+    const summary = summarizePursuitUnit(unit);
+    return `
+      <tr>
+        <td>${pursuitEscapeHtml(unit.unitId)}</td>
+        <td>${summary.pointCount}</td>
+        <td>${summary.distanceMiles.toFixed(2)} mi</td>
+        <td>${summary.maxSpeedMph.toFixed(1)} mph</td>
+        <td>${summary.maxSpeedPoint ? pursuitEscapeHtml(pursuitDisplayTime(summary.maxSpeedPoint.gpsTime || summary.maxSpeedPoint.clientTime)) : "—"}</td>
+        <td>${summary.firstPoint ? pursuitEscapeHtml(pursuitDisplayTime(summary.firstPoint.gpsTime || summary.firstPoint.clientTime)) : "—"}</td>
+        <td>${summary.lastPoint ? pursuitEscapeHtml(pursuitDisplayTime(summary.lastPoint.gpsTime || summary.lastPoint.clientTime)) : "—"}</td>
+      </tr>`;
+  }).join("");
+
+  const eventRows = events.map(e => `
+    <tr>
+      <td>${pursuitEscapeHtml(pursuitDisplayTime(e.serverTime || e.clientTime))}</td>
+      <td>${pursuitEscapeHtml(e.label || e.type || "Event")}</td>
+      <td>${pursuitEscapeHtml(e.by || "")}</td>
+      <td>${pursuitEscapeHtml(e.notes || "")}</td>
+    </tr>`).join("");
+
+  return `
+    <div class="report-shell">
+      <div class="report-actions">
+        <button onclick="printPursuitReportView()">PRINT / SAVE PDF</button>
+        <button onclick="closePursuitReportView()">CLOSE REPORT</button>
+      </div>
+
+      <h1>Gallatin County Sheriff's Office</h1>
+      <h2 style="margin-top:4px;border:0">Pursuit AVL After-Action Report</h2>
+
+      <div class="report-meta">
+        <strong>Pursuit ID</strong><span>${pursuitEscapeHtml(meta.displayId || record.id)}</span>
+        <strong>CAD / Incident</strong><span>${pursuitEscapeHtml(meta.incidentNumber || "Not entered")}</span>
+        <strong>Status</strong><span>${pursuitEscapeHtml(meta.status || "unknown")}</span>
+        <strong>Started</strong><span>${pursuitEscapeHtml(pursuitDisplayTime(meta.startedAt || meta.startedAtClient))}</span>
+        <strong>Started by</strong><span>${pursuitEscapeHtml(meta.startedBy || "Unknown")} (${pursuitEscapeHtml(meta.startedByMode || "")})</span>
+        <strong>Ended</strong><span>${pursuitEscapeHtml(meta.endedAt || meta.endedAtClient ? pursuitDisplayTime(meta.endedAt || meta.endedAtClient) : "Still active")}</span>
+        <strong>Ended by</strong><span>${pursuitEscapeHtml(meta.endedBy || "—")}</span>
+        <strong>Duration</strong><span>${pursuitEscapeHtml(duration)}</span>
+      </div>
+
+      <div class="report-notice">
+        GPS-derived speed, distance, heading, and route information are operational AVL records and are not certified radar/LIDAR or crash-reconstruction measurements. Missing segments can reflect GPS, browser, computer, or network interruptions. Dispatch sessions are view/control only and do not create vehicle breadcrumbs.
+      </div>
+
+      <h2>Route Map</h2>
+      <div id="pursuitReportMap"></div>
+
+      <h2>Unit Summary</h2>
+      <table>
+        <thead>
+          <tr><th>Unit</th><th>Points</th><th>Distance</th><th>Max recorded GPS speed</th><th>Max speed time</th><th>First point</th><th>Last point</th></tr>
+        </thead>
+        <tbody>${summaryRows || '<tr><td colspan="7">No field-unit breadcrumbs were recorded for this pursuit.</td></tr>'}</tbody>
+      </table>
+
+      <h2>Event Timeline</h2>
+      <table>
+        <thead><tr><th>Time</th><th>Event</th><th>Recorded by</th><th>Notes</th></tr></thead>
+        <tbody>${eventRows || '<tr><td colspan="4">No timeline markers recorded.</td></tr>'}</tbody>
+      </table>
+
+      <p style="margin-top:24px;font-size:11px;color:#555">Generated from GCSO AVL pursuit record schema ${PURSUIT_SCHEMA_VERSION} on ${pursuitEscapeHtml(new Date().toLocaleString())}.</p>
+    </div>`;
+}
+
+function renderPursuitReportLeafletMap(record) {
+  const mapEl = document.getElementById("pursuitReportMap");
+  if (!mapEl || typeof L === "undefined") return;
+
+  const units = normalizedPursuitUnits(record);
+  const events = normalizedPursuitEvents(record);
+  pursuitReportMapInstance = L.map(mapEl, { zoomControl: true, preferCanvas: true });
+
+  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    attribution: "&copy; OpenStreetMap contributors"
+  }).addTo(pursuitReportMapInstance);
+
+  const bounds = L.latLngBounds([]);
+
+  units.forEach(unit => {
+    const points = unit.points
+      .filter(p => isValidLatLon(Number(p.lat), Number(p.lon)))
+      .map(p => [Number(p.lat), Number(p.lon)]);
+
+    if (!points.length) return;
+
+    const color = pursuitColorForUnit(unit.unitKey);
+    L.polyline(points, {
+      color: "#ffffff",
+      weight: 7,
+      opacity: 0.9,
+      lineJoin: "round"
+    }).addTo(pursuitReportMapInstance);
+
+    L.polyline(points, {
+      color,
+      weight: 4,
+      opacity: 0.95,
+      lineJoin: "round"
+    }).addTo(pursuitReportMapInstance)
+      .bindTooltip(`Unit ${unit.unitId}`, { sticky: true });
+
+    L.circleMarker(points[0], {
+      radius: 6, color: "#fff", weight: 2, fillColor: "#27a844", fillOpacity: 1
+    }).addTo(pursuitReportMapInstance).bindTooltip(`Unit ${unit.unitId} start`);
+
+    L.circleMarker(points[points.length - 1], {
+      radius: 6, color: "#fff", weight: 2, fillColor: "#c82333", fillOpacity: 1
+    }).addTo(pursuitReportMapInstance).bindTooltip(`Unit ${unit.unitId} end`);
+
+    points.forEach(p => bounds.extend(p));
+  });
+
+  events
+    .filter(e => isValidLatLon(Number(e.lat), Number(e.lon)))
+    .forEach(e => {
+      const latLng = [Number(e.lat), Number(e.lon)];
+      L.circleMarker(latLng, {
+        radius: 5,
+        color: "#222",
+        weight: 2,
+        fillColor: "#ffd54f",
+        fillOpacity: 1
+      }).addTo(pursuitReportMapInstance)
+        .bindPopup(`<b>${pursuitEscapeHtml(e.label || e.type || "Pursuit event")}</b><br>${pursuitEscapeHtml(pursuitDisplayTime(e.serverTime || e.clientTime))}`);
+      bounds.extend(latLng);
+    });
+
+  if (bounds.isValid()) {
+    pursuitReportMapInstance.fitBounds(bounds, { padding: [35, 35], maxZoom: 17 });
+  } else {
+    pursuitReportMapInstance.setView([38.9, -84.5], 10);
+  }
+
+  setTimeout(() => pursuitReportMapInstance?.invalidateSize(), 100);
+}
+
+async function openPursuitReport() {
   try {
     const record = await loadPursuitRecord(selectedPursuitReportId());
-    const html = buildReportHtml(record);
-    reportWindow.document.open();
-    reportWindow.document.write(html);
-    reportWindow.document.close();
+    closePursuitReportView();
+    ensurePursuitReportViewStyles();
+
+    const overlay = document.createElement("div");
+    overlay.id = "pursuitReportOverlay";
+    overlay.innerHTML = buildPursuitReportViewMarkup(record);
+    document.body.appendChild(overlay);
+
+    renderPursuitReportLeafletMap(record);
   } catch (err) {
-    reportWindow.document.open();
-    reportWindow.document.write(`<p style="font-family:Arial;padding:20px">Report failed: ${pursuitEscapeHtml(err?.message || err)}</p>`);
-    reportWindow.document.close();
+    alert(`Report failed: ${err?.message || err}`);
   }
 }
 
