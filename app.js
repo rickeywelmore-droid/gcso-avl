@@ -137,7 +137,7 @@ const map = L.map("map").setView([38.9, -84.5], 10);
 // every map theme. The previous test build introduced a third-party dark
 // basemap that can demand an API key. Keeping one keyless tile source also
 // means changing themes never interrupts the live AVL map with a tile reload.
-const baseTiles = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+const baseTiles = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
   maxZoom: 19,
   attribution: '&copy; OpenStreetMap contributors'
 }).addTo(map);
