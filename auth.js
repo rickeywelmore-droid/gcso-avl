@@ -230,7 +230,7 @@ function initializeFirebaseAuthUi() {
   window.logout = firebaseAuthLogout;
 
   avlAuth.onAuthStateChanged((user) => {
-    if (avlAuthSigningOut) return;
+    if (avlAuthSigningOut || avlAuthBusy) return;
 
     if (user) {
       restoreFirebaseAuthSession(user);
