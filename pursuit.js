@@ -1062,7 +1062,18 @@ table{width:100%;border-collapse:collapse;font-size:12px}
 th,td{border:1px solid #bbb;padding:6px;text-align:left} th{background:#eee}
 .notice{margin:14px 0;padding:10px;background:#fff5cc;border-left:4px solid #c78f00;font-size:12px}
 .actions{display:flex;gap:8px;margin:12px 0}.actions button{padding:8px 12px}
-@media print{.actions{display:none}body{margin:10mm}#map{height:420px}}
+@media print{
+  .actions{display:none}
+  body{margin:7mm;font-size:11px}
+  h1{font-size:24px}
+  h2{font-size:18px;margin-top:18px}
+  .meta{margin:12px 0;gap:3px 10px}
+  .notice{margin:10px 0;padding:8px;font-size:10px}
+  #map{height:300px;margin:8px 0}
+  table{font-size:10px}
+  th,td{padding:4px}
+  h2,table{break-inside:avoid}
+}
 </style>
 </head>
 <body>
@@ -1124,8 +1135,25 @@ const data=${safeJson};
   }
 
   const width=Math.max(320,mapEl.clientWidth||900);
-  const height=Math.max(320,mapEl.clientHeight||520);
+  const height=Math.max(260,mapEl.clientHeight||520);
   const pad=44;
+
+  function haversineLocal(a,b){
+    const R=6371000;
+    const toRad=d=>Number(d)*Math.PI/180;
+    const lat1=toRad(a[0]), lat2=toRad(b[0]);
+    const dLat=lat2-lat1;
+    const dLon=toRad(Number(b[1])-Number(a[1]));
+    const q=Math.sin(dLat/2)**2+Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)**2;
+    return 2*R*Math.asin(Math.sqrt(q));
+  }
+
+  let maxSeparationMeters=0;
+  for(let i=0;i<allPoints.length;i++){
+    for(let j=i+1;j<allPoints.length;j++){
+      maxSeparationMeters=Math.max(maxSeparationMeters,haversineLocal(allPoints[i],allPoints[j]));
+    }
+  }
 
   function clampLat(lat){ return Math.max(-85.05112878,Math.min(85.05112878,lat)); }
   function worldPixel(lat,lon,z){
@@ -1193,10 +1221,19 @@ const data=${safeJson};
   const lons=allPoints.map(p=>p[1]);
   const minLat=Math.min.apply(null,lats), maxLat=Math.max.apply(null,lats);
   const minLon=Math.min.apply(null,lons), maxLon=Math.max.apply(null,lons);
-  svgText(8,18,maxLat.toFixed(5)+"° N","start");
-  svgText(8,height-8,minLat.toFixed(5)+"° N","start");
-  svgText(8,height-24,minLon.toFixed(5)+"°","start");
-  svgText(width-8,height-24,maxLon.toFixed(5)+"°","end");
+  const stationaryTest=maxSeparationMeters<10;
+
+  if(stationaryTest){
+    const centerLat=((minLat+maxLat)/2).toFixed(6);
+    const centerLon=((minLon+maxLon)/2).toFixed(6);
+    svgText(width/2,28,"Stationary / very short movement test","middle");
+    svgText(width/2,44,centerLat+", "+centerLon,"middle");
+  }else{
+    svgText(8,18,maxLat.toFixed(5)+"° N","start");
+    svgText(8,height-8,minLat.toFixed(5)+"° N","start");
+    svgText(8,height-24,minLon.toFixed(5)+"°","start");
+    svgText(width-8,height-24,maxLon.toFixed(5)+"°","end");
+  }
 
   // Approximate horizontal scale at the center latitude.
   const centerLat=(minLat+maxLat)/2;
@@ -1211,9 +1248,15 @@ const data=${safeJson};
     ? (niceMeters/1609.344).toFixed(niceMeters>=3218.688?0:1)+" mi"
     : Math.round(niceMeters)+" m";
   if(scaleEl){
-    scaleEl.style.width=scalePixels+"px";
-    scaleEl.style.borderBottom="3px solid #222";
-    scaleEl.innerHTML='<span style="position:absolute;left:0;bottom:5px">'+scaleLabel+'</span>';
+    if(stationaryTest){
+      scaleEl.style.width="auto";
+      scaleEl.style.borderBottom="0";
+      scaleEl.innerHTML='<span style="position:absolute;left:0;bottom:0;white-space:nowrap">GPS point spread: '+maxSeparationMeters.toFixed(1)+' m</span>';
+    }else{
+      scaleEl.style.width=scalePixels+"px";
+      scaleEl.style.borderBottom="3px solid #222";
+      scaleEl.innerHTML='<span style="position:absolute;left:0;bottom:5px">'+scaleLabel+'</span>';
+    }
   }
 
   function localPoint(lat,lon){
