@@ -10,7 +10,7 @@
   <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-database-compat.js"></script>
 
-  <link rel="stylesheet" href="styles.css?v=1.1.21"/>
+  <link rel="stylesheet" href="styles.css?v=1.2.0-20261117"/>
 
   <style>
     /* v1.1.18: one unified Normal/Dark mode.
@@ -47,6 +47,13 @@
   <input id="loginPassword" type="password" placeholder="AVL Password" autocomplete="current-password" />
 
   <button onclick="login()">Enter System</button>
+</div>
+
+
+<div id="pursuitBanner" class="pursuit-banner mode-hidden" role="status" aria-live="assertive">
+  <span class="pursuit-banner-dot"></span>
+  <strong>PURSUIT MODE ACTIVE</strong>
+  <span>All connected field units are recording AVL breadcrumbs.</span>
 </div>
 
 <div id="wrap">
@@ -95,9 +102,47 @@
 
     <hr>
 
+    <div id="pursuitPanel" class="pursuit-panel mode-hidden">
+      <div class="section-title pursuit-title">PURSUIT MODE</div>
+      <div id="pursuitDispatchHint" class="pursuit-hint">Any logged-in AVL user may activate pursuit mode</div>
+
+      <div id="pursuitStartArea">
+        <input id="pursuitIncidentNumber" type="text" placeholder="CAD / Incident # (optional)" maxlength="60" />
+        <button id="startPursuitButton" class="pursuit-start-button" onclick="startPursuitMode()">START PURSUIT</button>
+      </div>
+
+      <div id="pursuitActiveArea" class="mode-hidden">
+        <div id="pursuitActiveDetails" class="pursuit-active-details"></div>
+        <div id="pursuitElapsed" class="pursuit-elapsed"></div>
+        <select id="pursuitMarkerType">
+          <option value="other_agency_joined">Other Agency Joined</option>
+          <option value="primary_changed">Primary Unit Changed</option>
+          <option value="crash">Crash / Collision</option>
+          <option value="apprehension">Apprehension</option>
+          <option value="pursuit_terminated_by_supervisor">Supervisor Ordered Termination</option>
+          <option value="note">Timeline Note</option>
+        </select>
+        <button onclick="addPursuitTimelineMarker()">ADD TIMELINE MARKER</button>
+        <button class="pursuit-end-button" onclick="endPursuitMode()">END PURSUIT</button>
+      </div>
+
+      <div id="pursuitStatus" class="pursuit-status" aria-live="polite"></div>
+      <div id="pursuitBufferStatus" class="pursuit-buffer" aria-live="polite"></div>
+
+      <details id="pursuitReportArea" class="pursuit-report-area mode-hidden">
+        <summary>After-Action Reports</summary>
+        <select id="pursuitReportSelect"></select>
+        <button onclick="openPursuitReport()">OPEN REPORT / SAVE PDF</button>
+        <button onclick="exportPursuitCsv()">DOWNLOAD CSV</button>
+        <button onclick="exportPursuitKml()">DOWNLOAD KML</button>
+        <button onclick="downloadPursuitHtmlReport()">DOWNLOAD HTML REPORT</button>
+        <button onclick="clearPursuitTrails()">CLEAR PURSUIT TRAILS</button>
+      </details>
+    </div>
+
     <div id="unitList"></div>
 
-    <div class="app-version">GCSO AVL v1.1.22 · Build 2026-10-28</div>
+    <div class="app-version">GCSO AVL v1.2.0 · Build 2026-11-17</div>
 
     <div id="developerPanel" class="admin-only mode-hidden">
       <div class="section-title">DEVELOPER PANEL</div>
@@ -169,6 +214,7 @@
   </div>
 </div>
 
-<script src="app.js?v=1.1.22-20261028"></script>
+<script src="app.js?v=1.2.0-20261117"></script>
+<script src="pursuit.js?v=1.2.0-20261117"></script>
 </body>
 </html>

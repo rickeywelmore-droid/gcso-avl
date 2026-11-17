@@ -20,14 +20,14 @@ const auditMetricsRef = db.ref("auditMetrics");
 /*********************************************************************
  GCSO AVL CONFIGURATION
  --------------------------------------------------------------------
- Version: 1.1.22
- Build: 2026-10-28
+ Version: 1.2.0
+ Build: 2026-11-17
 
  Temporary client-side access gate. This is a convenience barrier,
  not strong authentication.
 *********************************************************************/
-const APP_VERSION = "1.1.22";
-const BUILD_DATE = "2026-10-28";
+const APP_VERSION = "1.2.0";
+const BUILD_DATE = "2026-11-17";
 const USER_PASSWORD = "GCSO123";
 const ADMIN_PASSWORD = "GCSOADMIN123";
 const PRESENCE_TIMEOUT_MINUTES = 2;
@@ -137,7 +137,7 @@ const map = L.map("map").setView([38.9, -84.5], 10);
 // every map theme. The previous test build introduced a third-party dark
 // basemap that can demand an API key. Keeping one keyless tile source also
 // means changing themes never interrupts the live AVL map with a tile reload.
-const baseTiles = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+const baseTiles = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
   maxZoom: 19,
   attribution: '&copy; OpenStreetMap contributors'
 }).addTo(map);
@@ -1252,7 +1252,7 @@ function applyModeUi() {
   const logoutButton = document.getElementById("logoutButton");
 
   if (gpsControls) gpsControls.classList.toggle("mode-hidden", userMode === "dispatch");
-  if (logoutButton) logoutButton.classList.toggle("mode-hidden", userMode !== "dispatch");
+  if (logoutButton) logoutButton.classList.toggle("mode-hidden", !currentUnitId);
   if (activeIdentity) {
     const identityType = userMode === "dispatch" ? "Dispatcher" : "Unit";
     activeIdentity.textContent = currentUnitId ? `${identityType}: ${currentUnitId}` : "Not logged in";

@@ -1,5 +1,17 @@
 # GCSO AVL Changelog
 
+## 1.2.0 — Pursuit Mode (2026-11-17)
+- Added agency-wide Pursuit Mode that can be activated or ended by any logged-in AVL user, with dispatch identified as the preferred activation point.
+- Added automatic approximately one-second breadcrumb recording for every connected field unit while a pursuit is active.
+- Pursuit breadcrumbs record timestamp, position, GPS-derived speed, heading, estimated accuracy, satellites, HDOP, and GPS source without altering normal AVL unit publishing.
+- Added local dead-zone buffering so field units can preserve pursuit breadcrumbs during ordinary cellular/Firebase outages and upload valid pursuit-time points after reconnection.
+- Added live color-coded pursuit trails for participating units.
+- Added optional CAD/incident number and timestamped pursuit timeline markers.
+- Added after-action reports with route map, unit point count, estimated route distance, maximum recorded GPS speed, start/end times, and event timeline.
+- Added CSV, KML, printable/PDF, and self-contained HTML report exports.
+- Added explicit report language that AVL GPS-derived speed/distance is operational documentation rather than certified radar/LIDAR or crash-reconstruction measurement.
+- Kept Pursuit Mode isolated in pursuit.js so existing GPS, Excalibur, serial recovery, roster, and normal Firebase unit publishing remain unchanged.
+
 ## 1.1.9 — Map Theme Test (2026-09-22)
 - Separated the interface dark mode from the basemap theme so each can be selected independently.
 - Added Light, Dark, and High Contrast map themes with the selected map theme remembered per device.
