@@ -20,14 +20,14 @@ const auditMetricsRef = db.ref("auditMetrics");
 /*********************************************************************
  GCSO AVL CONFIGURATION
  --------------------------------------------------------------------
- Version: 1.1.22
- Build: 2026-10-28
+ Version: 1.2.0
+ Build: 2026-11-17
 
  Temporary client-side access gate. This is a convenience barrier,
  not strong authentication.
 *********************************************************************/
-const APP_VERSION = "1.1.22";
-const BUILD_DATE = "2026-10-28";
+const APP_VERSION = "1.2.0";
+const BUILD_DATE = "2026-11-17";
 const USER_PASSWORD = "GCSO123";
 const ADMIN_PASSWORD = "GCSOADMIN123";
 const PRESENCE_TIMEOUT_MINUTES = 2;
