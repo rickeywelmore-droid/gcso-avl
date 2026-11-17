@@ -1052,13 +1052,12 @@ function buildReportHtml(record) {
 body{font-family:Arial,sans-serif;margin:24px;color:#111}
 h1{margin:0 0 4px} h2{margin-top:26px;border-bottom:2px solid #333;padding-bottom:5px}
 .meta{display:grid;grid-template-columns:180px 1fr;gap:5px 12px;margin:18px 0}
-#map{height:520px;border:1px solid #777;margin:12px 0;position:relative;overflow:hidden;background:#eef1f4}
-#map .map-tiles{position:absolute;inset:0;overflow:hidden}
-#map .map-tile{position:absolute;width:256px;height:256px;max-width:none;user-select:none}
-#map .map-overlay{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
-#map .map-message{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;text-align:center;color:#555;font-size:13px;background:linear-gradient(135deg,#eef1f4,#dde3e8)}
-#map .map-attribution{position:absolute;right:4px;bottom:3px;padding:2px 5px;background:rgba(255,255,255,.82);font-size:9px;color:#555}
-#map .map-north{position:absolute;left:8px;top:8px;padding:4px 6px;background:rgba(255,255,255,.88);border:1px solid #999;font-size:10px;font-weight:700}
+#map{height:520px;border:1px solid #777;margin:12px 0;position:relative;overflow:hidden;background:#f7f8fa}
+#map .map-overlay{position:absolute;inset:0;width:100%;height:100%}
+#map .map-message{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;text-align:center;color:#555;font-size:13px;background:linear-gradient(135deg,#f7f8fa,#e8ebef)}
+#map .map-north{position:absolute;left:8px;top:8px;padding:4px 6px;background:rgba(255,255,255,.92);border:1px solid #999;font-size:10px;font-weight:700}
+#map .map-caption{position:absolute;right:7px;bottom:5px;padding:3px 6px;background:rgba(255,255,255,.9);border:1px solid #bbb;font-size:9px;color:#555}
+#map .map-scale{position:absolute;left:12px;bottom:12px;height:22px;font-size:9px;color:#333}
 table{width:100%;border-collapse:collapse;font-size:12px}
 th,td{border:1px solid #bbb;padding:6px;text-align:left} th{background:#eee}
 .notice{margin:14px 0;padding:10px;background:#fff5cc;border-left:4px solid #c78f00;font-size:12px}
@@ -1085,7 +1084,7 @@ th,td{border:1px solid #bbb;padding:6px;text-align:left} th{background:#eee}
 GPS-derived speed, distance, heading, and route information are operational AVL records and are not certified radar/LIDAR or crash-reconstruction measurements. Missing segments can reflect GPS, browser, computer, or network interruptions. Dispatch sessions are view/control only and do not create vehicle breadcrumbs.
 </div>
 
-<h2>Route Map</h2>
+<h2>Route Diagram</h2>
 <div id="map"></div>
 
 <h2>Unit Summary</h2>
@@ -1153,32 +1152,68 @@ const data=${safeJson};
   const originX=centerX-width/2;
   const originY=centerY-height/2;
 
-  mapEl.innerHTML='<div class="map-tiles"></div><svg class="map-overlay" viewBox="0 0 '+width+' '+height+'" preserveAspectRatio="none"></svg><div class="map-north">N ↑</div><div class="map-attribution">© OpenStreetMap contributors</div>';
-  const tilesEl=mapEl.querySelector(".map-tiles");
+  mapEl.innerHTML='<svg class="map-overlay" viewBox="0 0 '+width+' '+height+'" preserveAspectRatio="none"></svg><div class="map-north">N ↑</div><div class="map-scale"></div><div class="map-caption">Self-contained AVL route diagram • no external map service</div>';
   const svg=mapEl.querySelector(".map-overlay");
+  const scaleEl=mapEl.querySelector(".map-scale");
   const ns="http://www.w3.org/2000/svg";
 
-  const minTileX=Math.floor(originX/256);
-  const maxTileX=Math.floor((originX+width)/256);
-  const minTileY=Math.floor(originY/256);
-  const maxTileY=Math.floor((originY+height)/256);
-  const tileCount=Math.pow(2,zoom);
+  // Light coordinate grid. This is intentionally self-contained so the
+  // report remains printable even with no internet or blocked tile servers.
+  for(let i=1;i<6;i++){
+    const x=(width/6)*i;
+    const y=(height/6)*i;
 
-  for(let tx=minTileX;tx<=maxTileX;tx++){
-    for(let ty=minTileY;ty<=maxTileY;ty++){
-      if(ty<0||ty>=tileCount) continue;
-      const wrappedX=((tx%tileCount)+tileCount)%tileCount;
-      const img=document.createElement("img");
-      img.className="map-tile";
-      img.alt="";
-      img.draggable=false;
-      img.referrerPolicy="no-referrer";
-      img.src="https://tile.openstreetmap.org/"+zoom+"/"+wrappedX+"/"+ty+".png";
-      img.style.left=(tx*256-originX)+"px";
-      img.style.top=(ty*256-originY)+"px";
-      img.onerror=function(){ this.style.display="none"; };
-      tilesEl.appendChild(img);
-    }
+    const v=document.createElementNS(ns,"line");
+    v.setAttribute("x1",x); v.setAttribute("y1","0");
+    v.setAttribute("x2",x); v.setAttribute("y2",height);
+    v.setAttribute("stroke","#d9dde2"); v.setAttribute("stroke-width","1");
+    svg.appendChild(v);
+
+    const h=document.createElementNS(ns,"line");
+    h.setAttribute("x1","0"); h.setAttribute("y1",y);
+    h.setAttribute("x2",width); h.setAttribute("y2",y);
+    h.setAttribute("stroke","#d9dde2"); h.setAttribute("stroke-width","1");
+    svg.appendChild(h);
+  }
+
+  function svgText(x,y,textValue,anchor){
+    const t=document.createElementNS(ns,"text");
+    t.setAttribute("x",x); t.setAttribute("y",y);
+    t.setAttribute("font-size","10");
+    t.setAttribute("font-family","Arial, sans-serif");
+    t.setAttribute("fill","#555");
+    t.setAttribute("text-anchor",anchor||"start");
+    t.textContent=textValue;
+    svg.appendChild(t);
+    return t;
+  }
+
+  // Show geographic extent around the edge of the diagram.
+  const lats=allPoints.map(p=>p[0]);
+  const lons=allPoints.map(p=>p[1]);
+  const minLat=Math.min.apply(null,lats), maxLat=Math.max.apply(null,lats);
+  const minLon=Math.min.apply(null,lons), maxLon=Math.max.apply(null,lons);
+  svgText(8,18,maxLat.toFixed(5)+"° N","start");
+  svgText(8,height-8,minLat.toFixed(5)+"° N","start");
+  svgText(8,height-24,minLon.toFixed(5)+"°","start");
+  svgText(width-8,height-24,maxLon.toFixed(5)+"°","end");
+
+  // Approximate horizontal scale at the center latitude.
+  const centerLat=(minLat+maxLat)/2;
+  const metersPerPixel=(156543.03392*Math.cos(centerLat*Math.PI/180))/Math.pow(2,zoom);
+  const targetPixels=Math.min(160,width*.22);
+  const targetMeters=targetPixels*metersPerPixel;
+  const niceMeters=targetMeters>=1609.344
+    ? Math.max(1609.344,Math.round(targetMeters/1609.344)*1609.344)
+    : Math.max(100,Math.round(targetMeters/100)*100);
+  const scalePixels=Math.max(35,niceMeters/metersPerPixel);
+  const scaleLabel=niceMeters>=1609.344
+    ? (niceMeters/1609.344).toFixed(niceMeters>=3218.688?0:1)+" mi"
+    : Math.round(niceMeters)+" m";
+  if(scaleEl){
+    scaleEl.style.width=scalePixels+"px";
+    scaleEl.style.borderBottom="3px solid #222";
+    scaleEl.innerHTML='<span style="position:absolute;left:0;bottom:5px">'+scaleLabel+'</span>';
   }
 
   function localPoint(lat,lon){
