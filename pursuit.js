@@ -11,6 +11,10 @@ const PURSUIT_RECORD_MIN_INTERVAL_MS = 900;
 const PURSUIT_MAX_FIX_AGE_MS = 5000;
 const PURSUIT_PENDING_STORAGE_KEY = "avl_pursuitPendingPoints_v1";
 const PURSUIT_PENDING_MAX_POINTS = 15000;
+const PURSUIT_ROLLING_STORAGE_KEY = "avl_pursuitRollingFixes_v1";
+const PURSUIT_ROLLING_WINDOW_MS = 15 * 60 * 1000;
+const PURSUIT_ROLLING_MAX_POINTS = 1200;
+const PURSUIT_ROLLING_PERSIST_MS = 5000;
 const PURSUIT_RECENT_REPORT_LIMIT = 12;
 const PURSUIT_UNIT_COLORS = [
   "#ff3b30", "#007aff", "#34c759", "#ff9500",
@@ -38,6 +42,11 @@ let pursuitTrailLabels = {};
 let pursuitPendingPoints = restorePendingPursuitPoints();
 let pursuitFlushInProgress = false;
 let pursuitRecentLoadTimer = null;
+let pursuitRollingFixes = restoreRollingPursuitFixes();
+let pursuitRollingLastGpsTime = 0;
+let pursuitRollingLastPersistTime = 0;
+let pursuitActivationReceivedAt = 0;
+let pursuitBackfilledForId = null;
 
 function getPursuitPanel() {
   return document.getElementById("pursuitPanel");
@@ -81,6 +90,63 @@ function pursuitIsFreshFix(fix) {
   if (!fix || !isValidLatLon(Number(fix.lat), Number(fix.lon))) return false;
   const gpsTime = Number(fix.gpsTime || 0);
   return !!gpsTime && (Date.now() - gpsTime) <= PURSUIT_MAX_FIX_AGE_MS;
+}
+
+function restoreRollingPursuitFixes() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(PURSUIT_ROLLING_STORAGE_KEY) || "[]");
+    if (!Array.isArray(parsed)) return [];
+    const cutoff = Date.now() - PURSUIT_ROLLING_WINDOW_MS;
+    return parsed
+      .filter(p => p && Number(p.gpsTime || 0) >= cutoff && isValidLatLon(Number(p.lat), Number(p.lon)))
+      .slice(-PURSUIT_ROLLING_MAX_POINTS);
+  } catch (_) {
+    return [];
+  }
+}
+
+function persistRollingPursuitFixes(force = false) {
+  const now = Date.now();
+  if (!force && (now - pursuitRollingLastPersistTime) < PURSUIT_ROLLING_PERSIST_MS) return;
+  pursuitRollingLastPersistTime = now;
+  try {
+    localStorage.setItem(PURSUIT_ROLLING_STORAGE_KEY, JSON.stringify(pursuitRollingFixes.slice(-PURSUIT_ROLLING_MAX_POINTS)));
+  } catch (_) {
+    // The pursuit-specific pending queue remains the higher priority store.
+  }
+}
+
+function compactRollingFix(fix) {
+  return {
+    lat: Number(fix.lat),
+    lon: Number(fix.lon),
+    speed: Number(fix.speed || 0),
+    heading: Number(fix.heading || 0),
+    acc: Number(fix.acc || 0),
+    satellites: Number(fix.satellites || serialSatellites || 0),
+    hdop: Number(fix.hdop || serialHdop || 0),
+    gpsSource: String(fix.gpsSource || "unknown"),
+    gpsTime: Number(fix.gpsTime || Date.now()),
+    capturedAt: Date.now()
+  };
+}
+
+function captureRollingPursuitFix() {
+  if (!currentUnitId || userMode === "dispatch") return;
+  const fix = lastFix;
+  if (!pursuitIsFreshFix(fix)) return;
+
+  const gpsTime = Number(fix.gpsTime || 0);
+  if (!gpsTime || gpsTime <= pursuitRollingLastGpsTime) return;
+  pursuitRollingLastGpsTime = gpsTime;
+
+  pursuitRollingFixes.push(compactRollingFix(fix));
+  const cutoff = Date.now() - PURSUIT_ROLLING_WINDOW_MS;
+  pursuitRollingFixes = pursuitRollingFixes
+    .filter(p => Number(p.gpsTime || 0) >= cutoff)
+    .slice(-PURSUIT_ROLLING_MAX_POINTS);
+
+  persistRollingPursuitFixes();
 }
 
 function pursuitActor() {
@@ -309,7 +375,7 @@ async function sendOrBufferPursuitPoint(record) {
 
 function buildPursuitPoint(fix) {
   const gpsTime = Number(fix.gpsTime || Date.now());
-  const speedMps = Number(fix.speed || 0);
+  const speedMps = Number(fix.speed ?? fix.speedMps ?? 0);
   return {
     lat: Number(fix.lat),
     lon: Number(fix.lon),
@@ -326,6 +392,40 @@ function buildPursuitPoint(fix) {
     sessionKey: String(currentSessionKey || ""),
     schemaVersion: PURSUIT_SCHEMA_VERSION
   };
+}
+
+async function backfillRollingPursuitPoints(pursuitId, meta = {}) {
+  if (!pursuitId || userMode === "dispatch" || !currentUnitId) return;
+  if (pursuitBackfilledForId === pursuitId) return;
+
+  const startedAt = Number(meta.startedAt || meta.startedAtClient || 0);
+  if (!startedAt) return;
+
+  pursuitBackfilledForId = pursuitId;
+  const unitKey = pursuitFirebaseKey(currentUnitId);
+  const upperBound = pursuitActivationReceivedAt ? (pursuitActivationReceivedAt - 250) : Date.now();
+  const lowerBound = startedAt - 2000;
+
+  const candidates = pursuitRollingFixes.filter(fix => {
+    const t = Number(fix.gpsTime || 0);
+    return t >= lowerBound && t <= upperBound && isValidLatLon(Number(fix.lat), Number(fix.lon));
+  });
+
+  if (!candidates.length) return;
+
+  await ensurePursuitUnitMeta(pursuitId, unitKey, candidates[0]);
+
+  for (const fix of candidates) {
+    const gpsTime = Number(fix.gpsTime || 0);
+    if (!gpsTime) continue;
+    const point = buildPursuitPoint(fix);
+    const pointKey = `b_${gpsTime}`;
+    sendOrBufferPursuitPoint({ pursuitId, unitKey, pointKey, point });
+  }
+
+  if (typeof addDiagnosticEvent === "function") {
+    addDiagnosticEvent(`Pursuit backfill queued: ${candidates.length} point(s) from rolling GPS buffer`);
+  }
 }
 
 function recordCurrentPursuitFix() {
@@ -628,6 +728,9 @@ function subscribePursuitMeta(pursuitId) {
   const handler = snap => {
     pursuitActiveMeta = snap.val() || {};
     renderPursuitActiveState();
+    if (pursuitActiveId === pursuitId && pursuitActiveMeta?.status === "active") {
+      backfillRollingPursuitPoints(pursuitId, pursuitActiveMeta);
+    }
   };
   ref.on("value", handler);
   pursuitActiveMetaListener = { ref, handler };
@@ -638,12 +741,16 @@ function onActivePursuitChanged(nextId) {
   pursuitActiveId = nextId || null;
 
   if (pursuitActiveId) {
+    pursuitActivationReceivedAt = Date.now();
+    pursuitBackfilledForId = null;
     subscribePursuitMeta(pursuitActiveId);
     attachPursuitTrails(pursuitActiveId);
     startLocalPursuitRecording();
     showPursuitMessage("Pursuit mode active — breadcrumb recording enabled.", "good");
   } else {
     stopLocalPursuitRecording();
+    pursuitActivationReceivedAt = 0;
+    pursuitBackfilledForId = null;
     subscribePursuitMeta(null);
     if (oldId) {
       pursuitLastCompletedId = oldId;
@@ -1049,6 +1156,12 @@ pursuitActiveIdRef.on("value", snap => {
 // Keep the pursuit panel in sync with app.js login/logout without modifying
 // the existing authentication/session code.
 setInterval(updatePursuitPanelVisibility, 500);
+
+// Maintain a short rolling GPS history even before pursuit activation. If a
+// field unit is already in a cellular dead zone when pursuit mode starts, the
+// stored points can be backfilled once that unit receives the activation.
+setInterval(captureRollingPursuitFix, 500);
+window.addEventListener("beforeunload", () => persistRollingPursuitFixes(true));
 
 // Buffered pursuit breadcrumbs survive ordinary cellular dead zones and are
 // retried after Firebase reconnects.
