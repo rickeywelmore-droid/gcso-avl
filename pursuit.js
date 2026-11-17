@@ -998,3 +998,70 @@ L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:19,att
 const bounds=[];
 for(const u of data.units){
   if(!u.points.length) continue;
+  L.polyline(u.points,{color:u.color,weight:4,opacity:.85}).addTo(map).bindTooltip("Unit "+u.unitId,{sticky:true});
+  for(const p of u.points) bounds.push(p);
+}
+for(const e of data.events){
+  L.circleMarker([e.lat,e.lon],{radius:6,weight:2,fillOpacity:.9}).addTo(map).bindPopup("<b>"+e.label+"</b><br>"+e.time);
+  bounds.push([e.lat,e.lon]);
+}
+if(bounds.length) map.fitBounds(bounds,{padding:[24,24]});
+<\/script>
+</body>
+</html>`;
+}
+
+async function openPursuitReport() {
+  const reportWindow = window.open("", "_blank");
+  if (!reportWindow) {
+    alert("Allow pop-ups for the AVL site to open the pursuit report.");
+    return;
+  }
+  reportWindow.document.write("<p style='font-family:Arial;padding:20px'>Building pursuit report…</p>");
+
+  try {
+    const record = await loadPursuitRecord(selectedPursuitReportId());
+    const html = buildReportHtml(record);
+    reportWindow.document.open();
+    reportWindow.document.write(html);
+    reportWindow.document.close();
+  } catch (err) {
+    reportWindow.document.open();
+    reportWindow.document.write(`<p style="font-family:Arial;padding:20px">Report failed: ${pursuitEscapeHtml(err?.message || err)}</p>`);
+    reportWindow.document.close();
+  }
+}
+
+async function downloadPursuitHtmlReport() {
+  try {
+    const record = await loadPursuitRecord(selectedPursuitReportId());
+    downloadBlobFile(pursuitSafeFilename(record, "html"), buildReportHtml(record), "text/html;charset=utf-8");
+  } catch (err) {
+    alert(err?.message || err);
+  }
+}
+
+// Global pursuit control listener. Every logged-in unit receives the same event.
+pursuitActiveIdRef.on("value", snap => {
+  onActivePursuitChanged(snap.val() || null);
+});
+
+// Keep the pursuit panel in sync with app.js login/logout without modifying
+// the existing authentication/session code.
+setInterval(updatePursuitPanelVisibility, 500);
+
+// Buffered pursuit breadcrumbs survive ordinary cellular dead zones and are
+// retried after Firebase reconnects.
+setInterval(flushPendingPursuitPoints, 3000);
+setInterval(updatePursuitBufferStatus, 1000);
+
+connectedRef.on("value", snap => {
+  if (snap.val() === true) {
+    setTimeout(flushPendingPursuitPoints, 1200);
+    scheduleRecentPursuitLoad(400);
+  }
+});
+
+updatePursuitPanelVisibility();
+renderPursuitActiveState();
+scheduleRecentPursuitLoad(800);
