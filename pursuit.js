@@ -1048,12 +1048,17 @@ function buildReportHtml(record) {
 <head>
 <meta charset="utf-8">
 <title>${pursuitEscapeHtml(meta.displayId || record.id)} — GCSO Pursuit Report</title>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <style>
 body{font-family:Arial,sans-serif;margin:24px;color:#111}
 h1{margin:0 0 4px} h2{margin-top:26px;border-bottom:2px solid #333;padding-bottom:5px}
 .meta{display:grid;grid-template-columns:180px 1fr;gap:5px 12px;margin:18px 0}
-#map{height:520px;border:1px solid #777;margin:12px 0}
+#map{height:520px;border:1px solid #777;margin:12px 0;position:relative;overflow:hidden;background:#eef1f4}
+#map .map-tiles{position:absolute;inset:0;overflow:hidden}
+#map .map-tile{position:absolute;width:256px;height:256px;max-width:none;user-select:none}
+#map .map-overlay{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+#map .map-message{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;text-align:center;color:#555;font-size:13px;background:linear-gradient(135deg,#eef1f4,#dde3e8)}
+#map .map-attribution{position:absolute;right:4px;bottom:3px;padding:2px 5px;background:rgba(255,255,255,.82);font-size:9px;color:#555}
+#map .map-north{position:absolute;left:8px;top:8px;padding:4px 6px;background:rgba(255,255,255,.88);border:1px solid #999;font-size:10px;font-weight:700}
 table{width:100%;border-collapse:collapse;font-size:12px}
 th,td{border:1px solid #bbb;padding:6px;text-align:left} th{background:#eee}
 .notice{margin:14px 0;padding:10px;background:#fff5cc;border-left:4px solid #c78f00;font-size:12px}
@@ -1097,22 +1102,135 @@ GPS-derived speed, distance, heading, and route information are operational AVL 
 
 <p style="margin-top:28px;font-size:11px;color:#555">Generated from GCSO AVL pursuit record schema ${PURSUIT_SCHEMA_VERSION} on ${pursuitEscapeHtml(new Date().toLocaleString())}.</p>
 
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"><\/script>
 <script>
 const data=${safeJson};
-const map=L.map("map").setView([38.9,-84.5],10);
-L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:19,attribution:"&copy; OpenStreetMap contributors"}).addTo(map);
-const bounds=[];
-for(const u of data.units){
-  if(!u.points.length) continue;
-  L.polyline(u.points,{color:u.color,weight:4,opacity:.85}).addTo(map).bindTooltip("Unit "+u.unitId,{sticky:true});
-  for(const p of u.points) bounds.push(p);
-}
-for(const e of data.events){
-  L.circleMarker([e.lat,e.lon],{radius:6,weight:2,fillOpacity:.9}).addTo(map).bindPopup("<b>"+e.label+"</b><br>"+e.time);
-  bounds.push([e.lat,e.lon]);
-}
-if(bounds.length) map.fitBounds(bounds,{padding:[24,24]});
+
+(function renderReportMap(){
+  const mapEl=document.getElementById("map");
+  if(!mapEl) return;
+
+  const allPoints=[];
+  for(const u of data.units){
+    for(const p of (u.points||[])){
+      if(Number.isFinite(Number(p[0]))&&Number.isFinite(Number(p[1]))) allPoints.push([Number(p[0]),Number(p[1])]);
+    }
+  }
+  for(const e of data.events){
+    if(Number.isFinite(Number(e.lat))&&Number.isFinite(Number(e.lon))) allPoints.push([Number(e.lat),Number(e.lon)]);
+  }
+
+  if(!allPoints.length){
+    mapEl.innerHTML='<div class="map-message">No field-unit GPS breadcrumbs were recorded, so there is no pursuit route to map.</div>';
+    return;
+  }
+
+  const width=Math.max(320,mapEl.clientWidth||900);
+  const height=Math.max(320,mapEl.clientHeight||520);
+  const pad=44;
+
+  function clampLat(lat){ return Math.max(-85.05112878,Math.min(85.05112878,lat)); }
+  function worldPixel(lat,lon,z){
+    const size=256*Math.pow(2,z);
+    const x=(lon+180)/360*size;
+    const rad=clampLat(lat)*Math.PI/180;
+    const y=(1-Math.log(Math.tan(rad)+1/Math.cos(rad))/Math.PI)/2*size;
+    return [x,y];
+  }
+
+  let zoom=18;
+  let worldBounds=null;
+  for(;zoom>=3;zoom--){
+    const px=allPoints.map(p=>worldPixel(p[0],p[1],zoom));
+    const xs=px.map(p=>p[0]), ys=px.map(p=>p[1]);
+    const minX=Math.min.apply(null,xs), maxX=Math.max.apply(null,xs);
+    const minY=Math.min.apply(null,ys), maxY=Math.max.apply(null,ys);
+    worldBounds={minX,minY,maxX,maxY};
+    if((maxX-minX)<=width-pad*2 && (maxY-minY)<=height-pad*2) break;
+  }
+
+  const centerX=(worldBounds.minX+worldBounds.maxX)/2;
+  const centerY=(worldBounds.minY+worldBounds.maxY)/2;
+  const originX=centerX-width/2;
+  const originY=centerY-height/2;
+
+  mapEl.innerHTML='<div class="map-tiles"></div><svg class="map-overlay" viewBox="0 0 '+width+' '+height+'" preserveAspectRatio="none"></svg><div class="map-north">N ↑</div><div class="map-attribution">© OpenStreetMap contributors</div>';
+  const tilesEl=mapEl.querySelector(".map-tiles");
+  const svg=mapEl.querySelector(".map-overlay");
+  const ns="http://www.w3.org/2000/svg";
+
+  const minTileX=Math.floor(originX/256);
+  const maxTileX=Math.floor((originX+width)/256);
+  const minTileY=Math.floor(originY/256);
+  const maxTileY=Math.floor((originY+height)/256);
+  const tileCount=Math.pow(2,zoom);
+
+  for(let tx=minTileX;tx<=maxTileX;tx++){
+    for(let ty=minTileY;ty<=maxTileY;ty++){
+      if(ty<0||ty>=tileCount) continue;
+      const wrappedX=((tx%tileCount)+tileCount)%tileCount;
+      const img=document.createElement("img");
+      img.className="map-tile";
+      img.alt="";
+      img.draggable=false;
+      img.referrerPolicy="no-referrer";
+      img.src="https://tile.openstreetmap.org/"+zoom+"/"+wrappedX+"/"+ty+".png";
+      img.style.left=(tx*256-originX)+"px";
+      img.style.top=(ty*256-originY)+"px";
+      img.onerror=function(){ this.style.display="none"; };
+      tilesEl.appendChild(img);
+    }
+  }
+
+  function localPoint(lat,lon){
+    const p=worldPixel(lat,lon,zoom);
+    return [p[0]-originX,p[1]-originY];
+  }
+
+  function addCircle(x,y,r,fill,stroke,titleText){
+    const c=document.createElementNS(ns,"circle");
+    c.setAttribute("cx",x); c.setAttribute("cy",y); c.setAttribute("r",r);
+    c.setAttribute("fill",fill); c.setAttribute("stroke",stroke); c.setAttribute("stroke-width","2");
+    if(titleText){
+      const t=document.createElementNS(ns,"title"); t.textContent=titleText; c.appendChild(t);
+    }
+    svg.appendChild(c);
+  }
+
+  for(const u of data.units){
+    if(!u.points||!u.points.length) continue;
+    const pts=u.points.map(p=>localPoint(Number(p[0]),Number(p[1])));
+    const line=document.createElementNS(ns,"polyline");
+    line.setAttribute("points",pts.map(p=>p[0].toFixed(1)+","+p[1].toFixed(1)).join(" "));
+    line.setAttribute("fill","none");
+    line.setAttribute("stroke","#fff");
+    line.setAttribute("stroke-width","7");
+    line.setAttribute("stroke-linejoin","round");
+    line.setAttribute("stroke-linecap","round");
+    line.setAttribute("opacity",".9");
+    svg.appendChild(line);
+
+    const colorLine=document.createElementNS(ns,"polyline");
+    colorLine.setAttribute("points",pts.map(p=>p[0].toFixed(1)+","+p[1].toFixed(1)).join(" "));
+    colorLine.setAttribute("fill","none");
+    colorLine.setAttribute("stroke",u.color||"#d22");
+    colorLine.setAttribute("stroke-width","4");
+    colorLine.setAttribute("stroke-linejoin","round");
+    colorLine.setAttribute("stroke-linecap","round");
+    const title=document.createElementNS(ns,"title");
+    title.textContent="Unit "+u.unitId;
+    colorLine.appendChild(title);
+    svg.appendChild(colorLine);
+
+    const first=pts[0], last=pts[pts.length-1];
+    addCircle(first[0],first[1],6,"#27a844","#fff","Unit "+u.unitId+" start");
+    addCircle(last[0],last[1],6,"#c82333","#fff","Unit "+u.unitId+" end");
+  }
+
+  for(const e of data.events){
+    const p=localPoint(Number(e.lat),Number(e.lon));
+    addCircle(p[0],p[1],5,"#ffd54f","#222",(e.label||"Pursuit event")+" — "+(e.time||""));
+  }
+})();
 <\/script>
 </body>
 </html>`;
