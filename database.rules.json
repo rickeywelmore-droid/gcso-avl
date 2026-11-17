@@ -1,0 +1,45 @@
+{
+  "rules": {
+    "units": {
+      ".read": true,
+      ".write": true
+    },
+    "sessions": {
+      ".read": true,
+      "dispatch__": {
+        ".write": false
+      },
+      "$sessionId": {
+        ".write": true
+      }
+    },
+    "auditLogs": {
+      ".read": true,
+      "$unitId": {
+        ".indexOn": ["timestamp", "clientTime", "eventTime"],
+        "$eventId": {
+          ".write": "(!data.exists() && newData.exists()) || (data.exists() && !newData.exists() && ((data.child('timestamp').isNumber() && data.child('timestamp').val() < now - 31536000000) || (!data.child('timestamp').exists() && data.child('clientTime').isNumber() && data.child('clientTime').val() < now - 31536000000)))"
+        }
+      }
+    },
+    "auditMetrics": {
+      ".read": true,
+      ".write": true
+    },
+    "pursuitControl": {
+      ".read": true,
+      ".write": true
+    },
+    "pursuits": {
+      ".read": true,
+      ".write": true,
+      ".indexOn": ["meta/startedAtClient"]
+    },
+    "profiles": {
+      "$uid": {
+        ".read": "auth != null && auth.uid == $uid",
+        ".write": false
+      }
+    }
+  }
+}
