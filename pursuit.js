@@ -1077,7 +1077,7 @@ th,td{border:1px solid #bbb;padding:6px;text-align:left} th{background:#eee}
 </div>
 
 <div class="notice">
-GPS-derived speed, distance, heading, and route information are operational AVL records and are not certified radar/LIDAR or crash-reconstruction measurements. Missing segments can reflect GPS, browser, computer, or network interruptions.
+GPS-derived speed, distance, heading, and route information are operational AVL records and are not certified radar/LIDAR or crash-reconstruction measurements. Missing segments can reflect GPS, browser, computer, or network interruptions. Dispatch sessions are view/control only and do not create vehicle breadcrumbs.
 </div>
 
 <h2>Route Map</h2>
@@ -1086,7 +1086,7 @@ GPS-derived speed, distance, heading, and route information are operational AVL 
 <h2>Unit Summary</h2>
 <table>
 <thead><tr><th>Unit</th><th>Points</th><th>Distance</th><th>Max recorded GPS speed</th><th>Max speed time</th><th>First point</th><th>Last point</th></tr></thead>
-<tbody>${summaryRows || '<tr><td colspan="7">No unit breadcrumbs recorded.</td></tr>'}</tbody>
+<tbody>${summaryRows || '<tr><td colspan="7">No field-unit breadcrumbs were recorded for this pursuit.</td></tr>'}</tbody>
 </table>
 
 <h2>Event Timeline</h2>
