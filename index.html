@@ -8,6 +8,7 @@
   <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
 
   <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-database-compat.js"></script>
 
   <link rel="stylesheet" href="styles.css?v=1.2.0-20261117"/>
@@ -37,16 +38,17 @@
 <div id="loginScreen">
   <h2>Gallatin County Sheriff's Office AVL</h2>
 
-  <input id="loginUnitId" placeholder="Unit ID / Dispatch Name" />
+  <input id="loginEmail" type="email" placeholder="Email" autocomplete="username" />
 
   <select id="loginMode" onchange="updateLoginPlaceholder()">
     <option value="unit">Unit</option>
     <option value="dispatch">Dispatch</option>
   </select>
 
-  <input id="loginPassword" type="password" placeholder="AVL Password" autocomplete="current-password" />
+  <input id="loginPassword" type="password" placeholder="Password" autocomplete="current-password" />
 
-  <button onclick="login()">Enter System</button>
+  <button id="loginButton" onclick="login()">Enter System</button>
+  <div id="loginStatus" style="max-width:300px;min-height:18px;margin-top:6px;color:#bbb;font-size:12px;text-align:center;" aria-live="polite"></div>
 </div>
 
 
@@ -142,7 +144,7 @@
 
     <div id="unitList"></div>
 
-    <div class="app-version">GCSO AVL v1.2.0 · Build 2026-11-17</div>
+    <div class="app-version">GCSO AVL v1.3.0-auth1 · Build 2026-11-17</div>
 
     <div id="developerPanel" class="admin-only mode-hidden">
       <div class="section-title">DEVELOPER PANEL</div>
@@ -214,7 +216,8 @@
   </div>
 </div>
 
-<script src="app.js?v=1.2.0-20261117"></script>
-<script src="pursuit.js?v=1.2.0-20261117"></script>
+<script src="app.js?v=1.3.0-auth1-20261117"></script>
+<script src="auth.js?v=1.3.0-auth1-20261117"></script>
+<script src="pursuit.js?v=1.3.0-auth1-20261117"></script>
 </body>
 </html>

@@ -20,13 +20,13 @@ const auditMetricsRef = db.ref("auditMetrics");
 /*********************************************************************
  GCSO AVL CONFIGURATION
  --------------------------------------------------------------------
- Version: 1.2.0
+ Version: 1.3.0-auth1
  Build: 2026-11-17
 
  Temporary client-side access gate. This is a convenience barrier,
  not strong authentication.
 *********************************************************************/
-const APP_VERSION = "1.2.0";
+const APP_VERSION = "1.3.0-auth1";
 const BUILD_DATE = "2026-11-17";
 const USER_PASSWORD = "GCSO123";
 const ADMIN_PASSWORD = "GCSOADMIN123";
@@ -1773,7 +1773,7 @@ async function logout() {
 }
 
 updateLoginPlaceholder();
-restoreLogin();
+// Firebase Auth test build: auth.js restores authenticated sessions.
 //////////////////////////////////////////////////////
 // WAKE LOCK / BACKGROUND SAFEGUARDS
 //////////////////////////////////////////////////////
