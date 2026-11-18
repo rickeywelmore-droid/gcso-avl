@@ -1558,7 +1558,13 @@ function forceBackToLogin(message) {
   }
 
   stopWatchingOwnDispatchSession();
+  stopUnitRosterSubscription();
+  if (typeof stopPursuitFirebaseSubscriptions === "function") {
+    stopPursuitFirebaseSubscriptions();
+  }
   clearSavedLogin();
+
+  firebase.auth().signOut().catch(() => {});
 
   currentUnitId = null;
   currentSessionKey = null;
