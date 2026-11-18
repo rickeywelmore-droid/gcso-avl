@@ -1,40 +1,46 @@
 {
   "rules": {
     "units": {
-      ".read": true,
-      ".write": true
+      ".read": "auth != null && root.child('profiles').child(auth.uid).child('enabled').val() == true",
+      ".write": "auth != null && root.child('profiles').child(auth.uid).child('enabled').val() == true"
     },
+
     "sessions": {
-      ".read": true,
-      "dispatch__": {
-        ".write": false
-      },
+      ".read": "auth != null && root.child('profiles').child(auth.uid).child('enabled').val() == true",
+
       "$sessionId": {
-        ".write": true
+        ".write": "auth != null && root.child('profiles').child(auth.uid).child('enabled').val() == true && $sessionId != 'dispatch__'"
       }
     },
+
     "auditLogs": {
-      ".read": true,
+      ".read": "auth != null && root.child('profiles').child(auth.uid).child('enabled').val() == true",
+
       "$unitId": {
         ".indexOn": ["timestamp", "clientTime", "eventTime"],
+
         "$eventId": {
-          ".write": "(!data.exists() && newData.exists()) || (data.exists() && !newData.exists() && ((data.child('timestamp').isNumber() && data.child('timestamp').val() < now - 31536000000) || (!data.child('timestamp').exists() && data.child('clientTime').isNumber() && data.child('clientTime').val() < now - 31536000000)))"
+          ".write": "auth != null && root.child('profiles').child(auth.uid).child('enabled').val() == true && ((!data.exists() && newData.exists()) || (data.exists() && !newData.exists() && ((data.child('timestamp').isNumber() && data.child('timestamp').val() < now - 31536000000) || (!data.child('timestamp').exists() && data.child('clientTime').isNumber() && data.child('clientTime').val() < now - 31536000000))))"
         }
       }
     },
+
     "auditMetrics": {
-      ".read": true,
-      ".write": true
+      ".read": "auth != null && root.child('profiles').child(auth.uid).child('enabled').val() == true",
+      ".write": "auth != null && root.child('profiles').child(auth.uid).child('enabled').val() == true"
     },
+
     "pursuitControl": {
-      ".read": true,
-      ".write": true
+      ".read": "auth != null && root.child('profiles').child(auth.uid).child('enabled').val() == true",
+      ".write": "auth != null && root.child('profiles').child(auth.uid).child('enabled').val() == true"
     },
+
     "pursuits": {
-      ".read": true,
-      ".write": true,
+      ".read": "auth != null && root.child('profiles').child(auth.uid).child('enabled').val() == true",
+      ".write": "auth != null && root.child('profiles').child(auth.uid).child('enabled').val() == true",
       ".indexOn": ["meta/startedAtClient"]
     },
+
     "profiles": {
       "$uid": {
         ".read": "auth != null && auth.uid == $uid",
