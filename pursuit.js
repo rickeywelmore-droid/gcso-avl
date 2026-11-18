@@ -1638,10 +1638,27 @@ async function downloadPursuitHtmlReport() {
   }
 }
 
-// Global pursuit control listener. Every logged-in unit receives the same event.
-pursuitActiveIdRef.on("value", snap => {
+let pursuitFirebaseSubscriptionsStarted = false;
+
+function handlePursuitControlSnapshot(snap) {
   onActivePursuitChanged(snap.val() || null);
-});
+}
+
+function startPursuitFirebaseSubscriptions() {
+  if (pursuitFirebaseSubscriptionsStarted) return;
+  if (!firebase.auth().currentUser || !currentUnitId) return;
+
+  pursuitFirebaseSubscriptionsStarted = true;
+  pursuitActiveIdRef.on("value", handlePursuitControlSnapshot);
+  scheduleRecentPursuitLoad(250);
+  setTimeout(flushPendingPursuitPoints, 600);
+}
+
+function stopPursuitFirebaseSubscriptions() {
+  if (!pursuitFirebaseSubscriptionsStarted) return;
+  pursuitActiveIdRef.off("value", handlePursuitControlSnapshot);
+  pursuitFirebaseSubscriptionsStarted = false;
+}
 
 // Keep the pursuit panel in sync with app.js login/logout without modifying
 // the existing authentication/session code.
@@ -1655,11 +1672,14 @@ window.addEventListener("beforeunload", () => persistRollingPursuitFixes(true));
 
 // Buffered pursuit breadcrumbs survive ordinary cellular dead zones and are
 // retried after Firebase reconnects.
-setInterval(flushPendingPursuitPoints, 3000);
+setInterval(() => {
+  if (firebase.auth().currentUser && currentUnitId) flushPendingPursuitPoints();
+}, 3000);
 setInterval(updatePursuitBufferStatus, 1000);
 
 connectedRef.on("value", snap => {
-  if (snap.val() === true) {
+  if (snap.val() === true && firebase.auth().currentUser && currentUnitId) {
+    startPursuitFirebaseSubscriptions();
     setTimeout(flushPendingPursuitPoints, 1200);
     scheduleRecentPursuitLoad(400);
   }
@@ -1667,4 +1687,7 @@ connectedRef.on("value", snap => {
 
 updatePursuitPanelVisibility();
 renderPursuitActiveState();
-scheduleRecentPursuitLoad(800);
+
+if (firebase.auth().currentUser && currentUnitId) {
+  startPursuitFirebaseSubscriptions();
+}

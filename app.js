@@ -290,6 +290,7 @@ let unitPublishTimerDue = 0;
 let unitPublishInFlight = false;
 let unitPublishInFlightPromise = null;
 let unitPublishEpoch = 0;
+let unitRosterSubscribed = false;
 let sessionRosterSubscribed = false;
 let dispatchRosterSubscribed = false;
 let dispatchSessionQuery = null;
@@ -1426,6 +1427,7 @@ function publishPresence(heartbeatOnly = false) {
     loginTime: sessionLoginTime || Date.now(),
     deviceId: clientInstallId,
     sessionId: clientSessionId,
+    authUid: firebase.auth().currentUser?.uid || "",
     publicIp: publicIpAddress,
     browser: getBrowserLabel(),
     platform: getPlatformLabel(),
@@ -1556,7 +1558,13 @@ function forceBackToLogin(message) {
   }
 
   stopWatchingOwnDispatchSession();
+  stopUnitRosterSubscription();
+  if (typeof stopPursuitFirebaseSubscriptions === "function") {
+    stopPursuitFirebaseSubscriptions();
+  }
   clearSavedLogin();
+
+  firebase.auth().signOut().catch(() => {});
 
   currentUnitId = null;
   currentSessionKey = null;
@@ -4111,9 +4119,23 @@ function handleUnitRemoved(snap) {
   scheduleRenderUnitList();
 }
 
-unitsRef.on("child_added", handleUnitAddedOrChanged);
-unitsRef.on("child_changed", handleUnitAddedOrChanged);
-unitsRef.on("child_removed", handleUnitRemoved);
+function startUnitRosterSubscription() {
+  if (unitRosterSubscribed) return;
+  unitRosterSubscribed = true;
+  unitsRef.on("child_added", handleUnitAddedOrChanged);
+  unitsRef.on("child_changed", handleUnitAddedOrChanged);
+  unitsRef.on("child_removed", handleUnitRemoved);
+}
+
+function stopUnitRosterSubscription() {
+  if (!unitRosterSubscribed) return;
+  unitsRef.off("child_added", handleUnitAddedOrChanged);
+  unitsRef.off("child_changed", handleUnitAddedOrChanged);
+  unitsRef.off("child_removed", handleUnitRemoved);
+  unitRosterSubscribed = false;
+  latestUnits = {};
+  scheduleRenderUnitList();
+}
 
 function handleSessionAddedOrChanged(snap) {
   if (!snap?.key) return;

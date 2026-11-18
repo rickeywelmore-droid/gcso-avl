@@ -93,6 +93,10 @@ async function startFirebaseAuthenticatedAvlSession(user, profile, requestedMode
   if (passwordEl) passwordEl.value = "";
 
   applyModeUi();
+  startUnitRosterSubscription();
+  if (typeof startPursuitFirebaseSubscriptions === "function") {
+    startPursuitFirebaseSubscriptions();
+  }
   startPresenceHeartbeat();
   watchOwnDispatchSession();
   startDispatchIdleMonitor();
@@ -163,6 +167,11 @@ async function firebaseAuthLogin() {
 
 async function firebaseAuthLogout() {
   if (avlAuthSigningOut) return;
+
+  stopUnitRosterSubscription();
+  if (typeof stopPursuitFirebaseSubscriptions === "function") {
+    stopPursuitFirebaseSubscriptions();
+  }
 
   const legacyLogout = window.__gcsoLegacyLogout;
   if (typeof legacyLogout === "function") {
